@@ -1,0 +1,103 @@
+{
+  "passed": true,
+  "platform": "win32",
+  "desktop": true,
+  "model": "deepseek-v4-flash",
+  "scenes": [
+    {
+      "name": "rich",
+      "elapsed_ms": 53344,
+      "samples": 9,
+      "total_tokens": 138547
+    },
+    {
+      "name": "experiment",
+      "elapsed_ms": 149786,
+      "samples": 16,
+      "total_tokens": 289141
+    },
+    {
+      "name": "experiment",
+      "elapsed_ms": 97371,
+      "samples": 13,
+      "total_tokens": 294251
+    },
+    {
+      "name": "experiment",
+      "elapsed_ms": 126552,
+      "samples": 13,
+      "total_tokens": 485647,
+      "delivered": true
+    },
+    {
+      "name": "follow-up",
+      "elapsed_ms": 18097,
+      "samples": 7,
+      "total_tokens": 189090,
+      "delivered": true
+    },
+    {
+      "name": "revision",
+      "elapsed_ms": 101873,
+      "samples": 13,
+      "total_tokens": 563412,
+      "delivered": true
+    },
+    {
+      "name": "layout-revision",
+      "elapsed_ms": 117866,
+      "samples": 14,
+      "total_tokens": 661366
+    },
+    {
+      "name": "layout-revision",
+      "elapsed_ms": 83049,
+      "samples": 14,
+      "total_tokens": 652916
+    },
+    {
+      "name": "layout-revision",
+      "elapsed_ms": 16095,
+      "samples": 5,
+      "total_tokens": 220170
+    },
+    {
+      "name": "layout-revision",
+      "elapsed_ms": 93833,
+      "samples": 10,
+      "total_tokens": 637345,
+      "delivered": true
+    },
+    {
+      "name": "argument",
+      "elapsed_ms": 72343,
+      "samples": 13,
+      "total_tokens": 768923
+    },
+    {
+      "name": "argument",
+      "elapsed_ms": 62595,
+      "samples": 11,
+      "total_tokens": 632968,
+      "delivered": true
+    }
+  ],
+  "injected": true,
+  "sawFailure": true,
+  "imageCount": 54,
+  "total_tokens": 5541937,
+  "reopened": {
+    "model_samples_before": 140,
+    "model_samples_after": 140,
+    "experiment": {
+      "presentation_id": "presentation-1789643071122938100-2",
+      "revision": 3
+    },
+    "argument": {
+      "presentation_id": "presentation-1789645509310707500-9",
+      "revision": 1
+    },
+    "state_unchanged": true,
+    "visible_content_unchanged": true
+  }
+}

@@ -291,6 +291,8 @@ pub struct ActiveContextStatus {
 
 #[derive(Debug, Clone)]
 pub struct AgentRequestPlan {
+    /// Ephemeral browser observations; never persisted into conversation history.
+    pub preview_images: Vec<crate::presentation_author::PreviewImage>,
     pub output_token_limit: Option<u32>,
     pub version: String,
     pub runtime_profile: ModelRuntimeProfile,
@@ -388,6 +390,7 @@ impl AgentRequestPlan {
             - i64::from(runtime_profile.safety_margin_tokens);
 
         Self {
+            preview_images: Vec::new(),
             version: AGENT_REQUEST_PLAN_VERSION.into(),
             active_context: ActiveContextStatus {
                 estimated_input_tokens,

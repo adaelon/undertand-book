@@ -21,6 +21,39 @@ pub const CAPABILITY_BLOCK_REASON_MAX_CHARS: usize = 48;
 pub const DEFAULT_DIRECT_TOOL_LIMIT: usize = 8;
 pub const MAX_DISCOVERY_ACTIVATIONS: usize = TOOL_SEARCH_MAX_RESULTS;
 
+/// Keep prior discovery useful as conversation context without making a
+/// run-local activation receipt look active in a later run.
+pub fn redact_history(messages: &mut [crate::Message]) {
+    for message in messages {
+        if message.role != crate::Role::Tool {
+            continue;
+        }
+        let Some(content) = message.content.as_mut() else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+            continue;
+        };
+        if value["version"].as_str() != Some(TOOL_SEARCH_RESULT_VERSION) {
+            continue;
+        }
+        let matched_tools = value["matches"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|matched| matched["name"].as_str())
+            .collect::<Vec<_>>();
+        *content = serde_json::json!({
+            "version": "tool_search_history.v1",
+            "task": value["task"],
+            "matched_tools": matched_tools,
+            "activation_status": "expired_after_prior_run",
+            "notice": "Historical discovery does not activate tools in the current run. Call tool.search again if a matched capability is still required."
+        })
+        .to_string();
+    }
+}
+
 const EXPLICIT_GUIDED_READ_CAPABILITY_SEED: [ToolCapability; 4] = [
     ToolCapability::ReaderRead,
     ToolCapability::StructuralIndex,
@@ -75,20 +108,55 @@ pub enum TurnIntentHint {
 pub fn classify_turn_intent(question: &str) -> BTreeSet<TurnIntentHint> {
     let normalized = action_request_text(question);
     let mut hints = BTreeSet::new();
-    if explicit_action(&normalized, &["保存", "记下", "添加", "记一条", "写一条", "记成笔记", "记笔记", "save", "add", "take a note"], &["笔记", "note"])
-        && ["笔记", "note"].iter().any(|word| normalized.contains(word)) {
+    if explicit_action(
+        &normalized,
+        &[
+            "保存",
+            "记下",
+            "添加",
+            "记一条",
+            "写一条",
+            "记成笔记",
+            "记笔记",
+            "save",
+            "add",
+            "take a note",
+        ],
+        &["笔记", "note"],
+    ) && ["笔记", "note"]
+        .iter()
+        .any(|word| normalized.contains(word))
+    {
         hints.insert(TurnIntentHint::ExplicitNote);
     }
     if explicit_action(&normalized, &["高亮", "highlight"], &["高亮", "highlight"]) {
         hints.insert(TurnIntentHint::ExplicitHighlight);
     }
-    if explicit_action(&normalized, &["跳转到", "跳到", "定位到", "jump to", "navigate to", "go to"], &["跳转", "跳到", "定位", "jump", "navigate", "go to"]) {
+    if explicit_action(
+        &normalized,
+        &[
+            "跳转到",
+            "跳到",
+            "定位到",
+            "jump to",
+            "navigate to",
+            "go to",
+        ],
+        &["跳转", "跳到", "定位", "jump", "navigate", "go to"],
+    ) {
         hints.insert(TurnIntentHint::ExplicitNavigation);
     }
     if normalized.is_empty()
-        || normalized.split(['，', ',', '。', '；', ';', '\n']).any(|clause|
-            ["跳转", "跳到", "定位", "jump", "navigate"].iter().any(|verb| clause.contains(verb))
-                && ["不要", "不用", "别", "不需要", "don't", "do not"].iter().any(|neg| clause.contains(neg)))
+        || normalized
+            .split(['，', ',', '。', '；', ';', '\n'])
+            .any(|clause| {
+                ["跳转", "跳到", "定位", "jump", "navigate"]
+                    .iter()
+                    .any(|verb| clause.contains(verb))
+                    && ["不要", "不用", "别", "不需要", "don't", "do not"]
+                        .iter()
+                        .any(|neg| clause.contains(neg))
+            })
         || EXPLICIT_GUIDED_READ_NEGATIONS_V1
             .iter()
             .any(|phrase| normalized.contains(phrase))
@@ -99,31 +167,71 @@ pub fn classify_turn_intent(question: &str) -> BTreeSet<TurnIntentHint> {
     if EXPLICIT_GUIDED_READ_PHRASES_V1
         .iter()
         .any(|phrase| normalized.contains(phrase))
-    { hints.insert(TurnIntentHint::ExplicitGuidedRead); }
+    {
+        hints.insert(TurnIntentHint::ExplicitGuidedRead);
+    }
     hints
 }
 
 // Quoted source and code are task data, never an action request.
 fn action_request_text(question: &str) -> String {
     let mut closing = None;
-    question.chars().filter(|&ch| {
+    question
+        .chars()
+        .filter(|&ch| {
         if let Some(end) = closing {
-            if ch == end { closing = None; }
+                if ch == end {
+                    closing = None;
+                }
             return false;
         }
-        closing = match ch { '“' => Some('”'), '‘' => Some('’'), '"' => Some('"'), '`' => Some('`'), _ => None };
+            closing = match ch {
+                '“' => Some('”'),
+                '‘' => Some('’'),
+                '"' => Some('"'),
+                '`' => Some('`'),
+                _ => None,
+            };
         closing.is_none()
-    }).collect::<String>().to_lowercase()
+        })
+        .collect::<String>()
+        .to_lowercase()
 }
 
 fn explicit_action(text: &str, requests: &[&str], verbs: &[&str]) -> bool {
     let clauses = text.split(['，', ',', '。', '；', ';', '\n']);
     let mut requested = false;
     for clause in clauses {
-        if !verbs.iter().any(|verb| clause.contains(verb)) { continue; }
-        if ["不要", "不用", "别", "不需要", "don't", "do not"].iter().any(|neg| clause.contains(neg)) { return false; }
-        let first_action = requests.iter().filter_map(|phrase| clause.find(phrase)).min().unwrap_or(clause.len());
-        if ["如何", "怎么", "怎样", "是否", "解释", "是什么意思", "how to", "how do", "explain"].iter().any(|meta| clause.find(meta).is_some_and(|index| index < first_action)) { continue; }
+        if !verbs.iter().any(|verb| clause.contains(verb)) {
+            continue;
+        }
+        if ["不要", "不用", "别", "不需要", "don't", "do not"]
+            .iter()
+            .any(|neg| clause.contains(neg))
+        {
+            return false;
+        }
+        let first_action = requests
+            .iter()
+            .filter_map(|phrase| clause.find(phrase))
+            .min()
+            .unwrap_or(clause.len());
+        if [
+            "如何",
+            "怎么",
+            "怎样",
+            "是否",
+            "解释",
+            "是什么意思",
+            "how to",
+            "how do",
+            "explain",
+        ]
+        .iter()
+        .any(|meta| clause.find(meta).is_some_and(|index| index < first_action))
+        {
+            continue;
+        }
         requested |= requests.iter().any(|phrase| clause.contains(phrase));
     }
     requested
@@ -282,11 +390,18 @@ pub struct ToolExposureState {
 impl ToolExposureState {
     pub(crate) fn authorizes_reader_action(&self, handler: ToolHandlerId) -> bool {
         // Layout and minimap retain their existing guided-read discovery/reducer policy.
-        if matches!(handler, ToolHandlerId::ReaderLayoutApply | ToolHandlerId::ReaderPaperMinimapApply) {
-            return self.action_hints.contains(&TurnIntentHint::ExplicitGuidedRead);
+        if matches!(
+            handler,
+            ToolHandlerId::ReaderLayoutApply | ToolHandlerId::ReaderPaperMinimapApply
+        ) {
+            return self
+                .action_hints
+                .contains(&TurnIntentHint::ExplicitGuidedRead);
         }
         self.action_hints.iter().any(|hint| match hint {
-            TurnIntentHint::ExplicitGuidedRead | TurnIntentHint::ExplicitNavigation => handler == ToolHandlerId::ReaderGotoLid,
+            TurnIntentHint::ExplicitGuidedRead | TurnIntentHint::ExplicitNavigation => {
+                handler == ToolHandlerId::ReaderGotoLid
+            }
             TurnIntentHint::ExplicitNote => handler == ToolHandlerId::ReaderNote,
             TurnIntentHint::ExplicitHighlight => handler == ToolHandlerId::ReaderHighlight,
         })
@@ -322,12 +437,18 @@ pub fn seed_turn_tool_activations(
     state.explicit_reader_mutation_intent = true;
 
     for registration in registry.registrations() {
-        let navigate = hints.contains(&TurnIntentHint::ExplicitGuidedRead) || hints.contains(&TurnIntentHint::ExplicitNavigation);
+        let navigate = hints.contains(&TurnIntentHint::ExplicitGuidedRead)
+            || hints.contains(&TurnIntentHint::ExplicitNavigation);
         let supported = if registration.routing_card.effects == ToolEffect::ReaderWrite {
-            matches!(registration.handler, ToolHandlerId::ReaderGotoLid | ToolHandlerId::ReaderNote | ToolHandlerId::ReaderHighlight)
-                && state.authorizes_reader_action(registration.handler)
+            matches!(
+                registration.handler,
+                ToolHandlerId::ReaderGotoLid
+                    | ToolHandlerId::ReaderNote
+                    | ToolHandlerId::ReaderHighlight
+            ) && state.authorizes_reader_action(registration.handler)
         } else {
-            (navigate && supports_explicit_guided_read(&registration.routing_card)) || registration.handler == ToolHandlerId::ReaderState
+            (navigate && supports_explicit_guided_read(&registration.routing_card))
+                || registration.handler == ToolHandlerId::ReaderState
         };
         if !supported {
             continue;
@@ -801,7 +922,11 @@ pub fn resolve_capabilities(
                 Some(ToolPrecondition::ExplicitReaderMutationIntent),
             ))
         } else if card.effects == ToolEffect::ReaderWrite
-            && !(ToolExposureState { action_hints: need.action_hints.clone(), ..Default::default() }).authorizes_reader_action(registration.handler)
+            && !(ToolExposureState {
+                action_hints: need.action_hints.clone(),
+                ..Default::default()
+            })
+            .authorizes_reader_action(registration.handler)
         {
             Some((CapabilityBlockReason::EffectNotAuthorized, None))
         } else {
@@ -1102,6 +1227,7 @@ fn classify(
     use ToolHandlerId as Handler;
 
     match handler {
+        Handler::PresentationAuthor => (Disposition::Deferred, Reason::CapabilityDeferred),
         Handler::ToolSearch => (Disposition::Direct, Reason::Discovery),
         Handler::Artifact(_) if !context.artifact.has_overlay() => {
             (Disposition::Hidden, Reason::ArtifactOverlayUnavailable)
@@ -1232,17 +1358,39 @@ mod tests {
         let registry = resident_tool_registry();
         let context = context(ContentProfileId::TechnicalLearning);
         let mut state = ToolExposureState::default();
-        seed_turn_tool_activations(&classify_turn_intent("找到并跳转到解释 purging 的原文"), &registry, &context, &mut state);
+        seed_turn_tool_activations(
+            &classify_turn_intent("找到并跳转到解释 purging 的原文"),
+            &registry,
+            &context,
+            &mut state,
+        );
         let plan = ToolExposurePlan::build(&registry, &model(), &context, &state);
         assert!(plan.is_visible("reader.gotoLid"));
         let outcome = search_and_activate(
             r#"{"task":"save a note","required_capabilities":["reader_write"],"scope":"passage","operation":"mutate_reader","effect_mode":"reader_mutation_explicitly_requested","max_results":6}"#,
             &context, &plan, &registry, &mut state).unwrap();
-        assert!(!outcome.matches.iter().any(|hit| matches!(hit.name.as_str(), "reader.note" | "reader.highlight")));
-        for question in ["不要跳转，只解释这段", "不要跳转，带我读这段", "解释如何跳转到原文", "书中说‘跳转到下一章’，是什么意思"] {
+        assert!(!outcome
+            .matches
+            .iter()
+            .any(|hit| matches!(hit.name.as_str(), "reader.note" | "reader.highlight")));
+        for question in [
+            "不要跳转，只解释这段",
+            "不要跳转，带我读这段",
+            "解释如何跳转到原文",
+            "书中说‘跳转到下一章’，是什么意思",
+        ] {
             let mut state = ToolExposureState::default();
-            seed_turn_tool_activations(&classify_turn_intent(question), &registry, &context, &mut state);
-            assert!(!ToolExposurePlan::build(&registry, &model(), &context, &state).is_visible("reader.gotoLid"), "{question}");
+            seed_turn_tool_activations(
+                &classify_turn_intent(question),
+                &registry,
+                &context,
+                &mut state,
+            );
+            assert!(
+                !ToolExposurePlan::build(&registry, &model(), &context, &state)
+                    .is_visible("reader.gotoLid"),
+                "{question}"
+            );
         }
     }
 
@@ -1252,16 +1400,30 @@ mod tests {
         let context = context(ContentProfileId::TechnicalLearning);
         for (question, note, highlight, navigation) in [
             ("不要跳转，只保存这条笔记", true, false, false),
-            ("找到原文，在对应位置保存一条阅读笔记，内容为‘不要高亮’", true, false, false),
+            (
+                "找到原文，在对应位置保存一条阅读笔记，内容为‘不要高亮’",
+                true,
+                false,
+                false,
+            ),
             ("找到并高亮原文中的这句话", false, true, false),
             ("请跳转到原文，并保存笔记和高亮这段", true, true, true),
             ("解释如何做笔记和高亮", false, false, false),
             ("不要保存笔记，只高亮这段", false, true, false),
         ] {
             let mut state = ToolExposureState::default();
-            seed_turn_tool_activations(&classify_turn_intent(question), &registry, &context, &mut state);
+            seed_turn_tool_activations(
+                &classify_turn_intent(question),
+                &registry,
+                &context,
+                &mut state,
+            );
             let plan = ToolExposurePlan::build(&registry, &model(), &context, &state);
-            for (name, expected) in [("reader.note", note), ("reader.highlight", highlight), ("reader.gotoLid", navigation)] {
+            for (name, expected) in [
+                ("reader.note", note),
+                ("reader.highlight", highlight),
+                ("reader.gotoLid", navigation),
+            ] {
                 assert_eq!(plan.is_visible(name), expected, "{question}: {name}");
             }
         }
@@ -1272,6 +1434,42 @@ mod tests {
         native_chat_request_projection, react_chat_request_projection, AgentRequestPlan, Message,
         ModelRuntimeCatalog, ProviderToolProtocol,
     };
+
+    #[test]
+    fn historical_discovery_keeps_match_but_expires_run_local_activation() {
+        let mut message = crate::Message {
+            role: crate::Role::Tool,
+            content: Some(
+                serde_json::json!({
+                    "version": TOOL_SEARCH_RESULT_VERSION,
+                    "task": "interactive explanation",
+                    "matches": [{"name":"presentation.author","description":"large transient schema"}],
+                    "activated": ["presentation.author"],
+                    "visible_from": "next_sampling"
+                })
+                .to_string(),
+            ),
+            tool_calls: Vec::new(),
+            tool_call_id: Some("discover".into()),
+        };
+
+        redact_history(std::slice::from_mut(&mut message));
+
+        let historical: serde_json::Value =
+            serde_json::from_str(message.content.as_deref().unwrap()).unwrap();
+        assert_eq!(historical["version"], "tool_search_history.v1");
+        assert_eq!(
+            historical["matched_tools"],
+            serde_json::json!(["presentation.author"])
+        );
+        assert_eq!(historical["activation_status"], "expired_after_prior_run");
+        assert!(historical.get("activated").is_none());
+        assert!(!message
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("large transient schema"));
+    }
 
     fn model() -> ModelRuntimeProfile {
         ModelRuntimeProfile::fallback("test-model", ProviderToolProtocol::Native)

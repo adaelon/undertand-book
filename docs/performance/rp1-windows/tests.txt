@@ -1,0 +1,9 @@
+
+running 5 tests
+test presentation_preview_attributes_script_errors_and_failed_actions ... ok
+test presentation_preview_executes_graphics_and_real_input ... ok
+test presentation_preview_has_no_reader_access_or_network_side_effects ... ok
+test presentation_preview_pre_cancelled_never_launches_browser ... ok
+test presentation_preview_stops_hung_javascript_on_cancel_and_deadline ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.53s

@@ -20,11 +20,23 @@ impl AppStatePort for Arc<Mutex<AppState>> {
     }
 }
 
-pub(crate) struct RuntimeStatePort<'a, P>(pub &'a P);
+pub(crate) struct RuntimeStatePort<'a, P> {
+    pub port: &'a P,
+    pub turn_ref: &'a AgentTurnRef,
+    pub previewed: std::collections::HashMap<String, std::collections::HashSet<String>>,
+}
 impl<P: AppStatePort> ResidentStatePort for RuntimeStatePort<'_, P> {
+    fn author_presentation(
+        &mut self,
+        request: runtime::presentation_author::AuthorRequest,
+        bindings: &[SourceBinding],
+        messages: &[Message],
+        cancellation: &CancellationToken,
+    ) -> Result<runtime::presentation_author::AuthorResult, ToolError> {
+        self.author(request, bindings, messages, cancellation)
+    }
     fn with_state<R>(&mut self, operation: impl FnOnce(&mut MemoryStore, &mut Reader) -> R) -> R {
-        self.0
-            .with_app(|state| {
+        self.port.with_app(|state| {
                 let before = state.reader.revision();
                 let result = operation(&mut state.store, &mut state.reader);
                 if state.reader.revision() != before {
@@ -135,25 +147,37 @@ fn execute_observed(
     cancellation: CancellationToken,
     stream: Option<&Arc<RunStream>>,
 ) -> ExecutionReport {
+    runtime::presentation_author::redact_history(&mut prepared.messages);
+    runtime::tool_exposure::redact_history(&mut prepared.messages);
     let mut context = RunContext::new(
         std::mem::take(&mut prepared.messages),
         OuterConfig::default(),
         adapter.model_runtime_profile(),
     );
     context.cancellation = cancellation.clone();
-    if let Some(stream) = stream { context.events = runtime::run_events::RunEvents::new(Some(stream.clone())); }
+    if let Some(stream) = stream {
+        context.events = runtime::run_events::RunEvents::new(Some(stream.clone()));
+    }
     adapter.set_run_cancellation(cancellation.clone());
-    let observed = runtime::run_events::ObservedAdapter { inner: adapter, events: context.events.clone(), cancellation: cancellation.clone() };
+    let observed = runtime::run_events::ObservedAdapter {
+        inner: adapter,
+        events: context.events.clone(),
+        cancellation: cancellation.clone(),
+    };
     let adapter = CancellableAdapter {
         inner: &observed,
         cancellation: cancellation.clone(),
     };
     let result = run_precommitted_agent_chat(port, &adapter, &prepared, &mut context);
+    runtime::presentation_author::redact_history(&mut context.messages);
+    runtime::tool_exposure::redact_history(&mut context.messages);
     let cancelled = cancellation.is_cancelled();
     if cancelled {
         context.close_cancelled_tool_calls();
     }
-    if let Some(stream) = stream { stream.finalizing(); }
+    if let Some(stream) = stream {
+        stream.finalizing();
+    }
     let last_seq = stream.map(|s| s.snapshot().last_seq + 2);
     let summary = match &result {
         Ok(outcome) => AgentRunSummary {
@@ -173,6 +197,25 @@ fn execute_observed(
         Err(cancellation.check().unwrap_err())
     } else {
         result
+    };
+    // A provider/protocol failure has no committed assistant answer. Its tool receipts carry
+    // run-local state (deferred activations, evidence bindings and candidate
+    // handles), so feeding that suffix into the next run makes expired state
+    // look reusable. Keep the user's question for an ordinary "retry" follow-up,
+    // while retaining the detailed failure trace out of band in run_summary. A
+    // cancelled run keeps its synthetic closing receipts so the persisted tool
+    // protocol remains balanced, as required by the cancellation contract.
+    let persisted_messages = if result.is_ok() || cancelled {
+        context.messages.clone()
+    } else {
+        let mut messages = context.messages.clone();
+        if let Some(current_user) = messages
+            .iter()
+            .rposition(|message| message.role == runtime::Role::User)
+        {
+            messages.truncate(current_user + 1);
+        }
+        messages
     };
     port.with_app(|state| {
         if summary
@@ -205,7 +248,7 @@ fn execute_observed(
             outcome.clone(),
             error,
             Some(summary.clone()),
-            &context.messages,
+            &persisted_messages,
             &prepared.now,
         ) {
             return ExecutionReport {
@@ -231,7 +274,7 @@ fn execute_observed(
             == Some(&prepared.turn_ref.session_id)
             && state.book.base.book_id == prepared.book.base.book_id
         {
-            state.messages = context.messages;
+            state.messages = persisted_messages;
         }
         if let Err(error) = reconcile_agent_history_review_jobs(state, &prepared.now) {
             return ExecutionReport::saved(err_reply(&error));
@@ -275,20 +318,42 @@ impl RunCoordinator {
             unsaved_stream: Mutex::new(None),
         }
     }
-    fn reserve(&self, body: &str, now: &str) -> Result<(PreparedAgentChat, CancellationToken, Arc<RunStream>), Reply> {
+    fn reserve(
+        &self,
+        body: &str,
+        now: &str,
+    ) -> Result<(PreparedAgentChat, CancellationToken, Arc<RunStream>), Reply> {
         let mut slot = self.slot.lock().unwrap_or_else(|error| error.into_inner());
         if slot.active.is_some() || slot.boundary || slot.stopping {
             return Err(Reply { status: 409, body: json!({ "error_code": "AGENT_RUN_BUSY", "category": "conflict",
                 "message": "A Resident run or context transition is active", "turn_id": slot.active.as_ref().map(|r| &r.turn_ref.turn_id) }).to_string() });
         }
-        let prepared = self.state.with_app(|state| prepare_agent_chat(state, body, now))?;
+        let prepared = self
+            .state
+            .with_app(|state| prepare_agent_chat(state, body, now))?;
         let cancellation = CancellationToken::with_host_stop(self.host_stop.clone());
-        let stream = RunStream::new(RunDescriptor { book_id: prepared.book.base.book_id.clone(), session_id: prepared.turn_ref.session_id.clone(), turn_id: prepared.turn_ref.turn_id.clone() });
-        self.state.with_app(|state| state.active_agent_stream = Some(Arc::downgrade(&stream)));
-        slot.active = Some(ActiveRun { turn_ref: prepared.turn_ref.clone(), cancellation: cancellation.clone(), stream: stream.clone() });
+        let stream = RunStream::new(RunDescriptor {
+            book_id: prepared.book.base.book_id.clone(),
+            session_id: prepared.turn_ref.session_id.clone(),
+            turn_id: prepared.turn_ref.turn_id.clone(),
+        });
+        self.state
+            .with_app(|state| state.active_agent_stream = Some(Arc::downgrade(&stream)));
+        slot.active = Some(ActiveRun {
+            turn_ref: prepared.turn_ref.clone(),
+            cancellation: cancellation.clone(),
+            stream: stream.clone(),
+        });
         Ok((prepared, cancellation, stream))
     }
-    fn execute(&self, prepared: PreparedAgentChat, cancellation: CancellationToken, stream: Arc<RunStream>, adapter: &dyn ModelAdapter, on_exit: impl FnOnce()) -> Reply {
+    fn execute(
+        &self,
+        prepared: PreparedAgentChat,
+        cancellation: CancellationToken,
+        stream: Arc<RunStream>,
+        adapter: &dyn ModelAdapter,
+        on_exit: impl FnOnce(),
+    ) -> Reply {
         let _running = RunGuard(self);
         let descriptor = stream.snapshot().descriptor;
         let result = execute_observed(&self.state, adapter, prepared, cancellation, Some(&stream));
@@ -297,43 +362,126 @@ impl RunCoordinator {
             *self.unsaved.lock().unwrap() = Some(unsaved);
             *self.unsaved_stream.lock().unwrap() = Some(stream);
         } else {
-            let view = self.state.with_app(|state| state.agent_history.sessions.iter()
-                .find(|s| s.id == descriptor.session_id).and_then(|s| s.turns.iter().find(|t| t.turn_id == descriptor.turn_id))
-                .map(|turn| json!(turn_view(&state.book, turn))));
+            let view = self.state.with_app(|state| {
+                state
+                    .agent_history
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == descriptor.session_id)
+                    .and_then(|s| s.turns.iter().find(|t| t.turn_id == descriptor.turn_id))
+                    .map(|turn| json!(turn_view(&state.book, turn)))
+            });
             stream.finish(view, None);
         }
         on_exit();
         result.reply
     }
-    pub fn run(&self, body: &str, now: &str, adapter: &dyn ModelAdapter, on_started: impl FnOnce(), on_exit: impl FnOnce()) -> Reply {
-        let (prepared, cancellation, stream) = match self.reserve(body, now) { Ok(run) => run, Err(reply) => return reply };
+    pub fn run(
+        &self,
+        body: &str,
+        now: &str,
+        adapter: &dyn ModelAdapter,
+        on_started: impl FnOnce(),
+        on_exit: impl FnOnce(),
+    ) -> Reply {
+        let (prepared, cancellation, stream) = match self.reserve(body, now) {
+            Ok(run) => run,
+            Err(reply) => return reply,
+        };
         on_started();
         self.execute(prepared, cancellation, stream, adapter, on_exit)
     }
-    pub fn start(self: &Arc<Self>, body: &str, now: &str, adapter: Box<dyn ModelAdapter + Send>, on_started: impl FnOnce(), on_exit: impl FnOnce() + Send + 'static) -> Reply {
-        let (prepared, cancellation, stream) = match self.reserve(body, now) { Ok(run) => run, Err(reply) => return reply };
+    pub fn start(
+        self: &Arc<Self>,
+        body: &str,
+        now: &str,
+        adapter: Box<dyn ModelAdapter + Send>,
+        on_started: impl FnOnce(),
+        on_exit: impl FnOnce() + Send + 'static,
+    ) -> Reply {
+        let (prepared, cancellation, stream) = match self.reserve(body, now) {
+            Ok(run) => run,
+            Err(reply) => return reply,
+        };
         let descriptor = stream.snapshot().descriptor;
         on_started();
         let coordinator = self.clone();
-        std::thread::spawn(move || { coordinator.execute(prepared, cancellation, stream, adapter.as_ref(), on_exit); });
-        Reply { status: 202, body: json!(descriptor).to_string() }
+        std::thread::spawn(move || {
+            coordinator.execute(prepared, cancellation, stream, adapter.as_ref(), on_exit);
+        });
+        Reply {
+            status: 202,
+            body: json!(descriptor).to_string(),
+        }
     }
     pub fn stream(&self, turn_id: &str) -> Option<Arc<RunStream>> {
         {
             let slot = self.slot.lock().unwrap();
-            if let Some(active) = slot.active.as_ref().filter(|r| r.turn_ref.turn_id == turn_id) { return Some(active.stream.clone()); }
+            if let Some(active) = slot
+                .active
+                .as_ref()
+                .filter(|r| r.turn_ref.turn_id == turn_id)
+            {
+                return Some(active.stream.clone());
+            }
         }
-        if let Some(stream) = self.unsaved_stream.lock().unwrap().as_ref().filter(|s| s.snapshot().descriptor.turn_id == turn_id) { return Some(stream.clone()); }
+        if let Some(stream) = self
+            .unsaved_stream
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|s| s.snapshot().descriptor.turn_id == turn_id)
+        {
+            return Some(stream.clone());
+        }
         self.state.with_app(|state| {
-            state.agent_history.sessions.iter().filter(|s| s.book_id == state.book.base.book_id).find_map(|session| {
-                session.turns.iter().find(|t| t.turn_id == turn_id).map(|turn| {
-                    let execution = match turn.status { AgentAssistantStatus::Completed => "completed", AgentAssistantStatus::Cancelled => "cancelled", AgentAssistantStatus::Failed => "failed", AgentAssistantStatus::PendingAssistant => "interrupted" };
+            state
+                .agent_history
+                .sessions
+                .iter()
+                .filter(|s| s.book_id == state.book.base.book_id)
+                .find_map(|session| {
+                    session
+                        .turns
+                        .iter()
+                        .find(|t| t.turn_id == turn_id)
+                        .map(|turn| {
+                            let execution = match turn.status {
+                                AgentAssistantStatus::Completed => "completed",
+                                AgentAssistantStatus::Cancelled => "cancelled",
+                                AgentAssistantStatus::Failed => "failed",
+                                AgentAssistantStatus::PendingAssistant => "interrupted",
+                            };
                     RunStream::from_snapshot(RunSnapshot {
-                        descriptor: RunDescriptor { book_id: session.book_id.clone(), session_id: session.id.clone(), turn_id: turn.turn_id.clone() },
-                        last_seq: turn.run_summary.as_ref().and_then(|s| s.last_seq).unwrap_or(0),
-                        execution_state: execution.into(), persistence_state: if turn.status == AgentAssistantStatus::PendingAssistant { "failed" } else { "saved" }.into(),
-                        activities: turn.run_summary.as_ref().and_then(|s| s.activities.clone()).unwrap_or_default(),
-                        reader_state: None, effects: Vec::new(), draft: None, final_view: Some(json!(turn_view(&state.book, turn))), error: None,
+                                descriptor: RunDescriptor {
+                                    book_id: session.book_id.clone(),
+                                    session_id: session.id.clone(),
+                                    turn_id: turn.turn_id.clone(),
+                                },
+                                last_seq: turn
+                                    .run_summary
+                                    .as_ref()
+                                    .and_then(|s| s.last_seq)
+                                    .unwrap_or(0),
+                                execution_state: execution.into(),
+                                persistence_state: if turn.status
+                                    == AgentAssistantStatus::PendingAssistant
+                                {
+                                    "failed"
+                                } else {
+                                    "saved"
+                                }
+                                .into(),
+                                activities: turn
+                                    .run_summary
+                                    .as_ref()
+                                    .and_then(|s| s.activities.clone())
+                                    .unwrap_or_default(),
+                                reader_state: None,
+                                effects: Vec::new(),
+                                draft: None,
+                                final_view: Some(json!(turn_view(&state.book, turn))),
+                                error: None,
                     })
                 })
             })
@@ -342,8 +490,13 @@ impl RunCoordinator {
     pub fn cancel_run(&self, turn_id: &str) -> Option<RunSnapshot> {
         {
             let slot = self.slot.lock().unwrap();
-            if let Some(active) = slot.active.as_ref().filter(|r| r.turn_ref.turn_id == turn_id) {
-                active.cancellation.cancel(); active.stream.cancelling();
+            if let Some(active) = slot
+                .active
+                .as_ref()
+                .filter(|r| r.turn_ref.turn_id == turn_id)
+            {
+                active.cancellation.cancel();
+                active.stream.cancelling();
             }
         }
         self.stream(turn_id).map(|s| s.snapshot())

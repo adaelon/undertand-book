@@ -222,15 +222,31 @@ fn resident_cancel_keeps_completed_note_and_blocks_returned_tools_and_later_samp
         .tool("reader.note", json!({"lid":"1.1","text":"agent note"}));
     let step = provider.next();
     assert!(step.request.to_string().contains("agent note"));
-    let turn_id = running.state.lock().unwrap().agent_history.sessions[0].turns[0].turn_id.clone();
+    let turn_id = running.state.lock().unwrap().agent_history.sessions[0].turns[0]
+        .turn_id
+        .clone();
     let stream = running.run_coordinator.stream(&turn_id).unwrap();
     let live = stream.snapshot();
     assert_eq!(live.effects.len(), 1);
     assert_eq!(live.effects[0]["effect"]["kind"], "Note");
-    let revision = live.reader_state.as_ref().unwrap()["revision"].as_u64().unwrap();
-    assert_eq!(http(&running.url, "POST", "/reader/goto", json!({"lid":"1.30"})).0, 200);
-    assert!(http(&running.url, "POST", "/reader/state", json!({})).1["revision"].as_u64().unwrap() > revision);
-    assert_eq!(stream.snapshot().effects.len(), 1, "manual operations are not Agent effects");
+    let revision = live.reader_state.as_ref().unwrap()["revision"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(
+        http(&running.url, "POST", "/reader/goto", json!({"lid":"1.30"})).0,
+        200
+    );
+    assert!(
+        http(&running.url, "POST", "/reader/state", json!({})).1["revision"]
+            .as_u64()
+            .unwrap()
+            > revision
+    );
+    assert_eq!(
+        stream.snapshot().effects.len(),
+        1,
+        "manual operations are not Agent effects"
+    );
     assert!(running.run_coordinator.cancel().is_some());
     let busy = http(
         &running.url,
@@ -251,7 +267,10 @@ fn resident_cancel_keeps_completed_note_and_blocks_returned_tools_and_later_samp
     assert_eq!(summary.trace.len(), 1);
     let activities = summary.activities.as_ref().unwrap();
     assert_eq!(activities.iter().filter(|a| a.kind == "tool").count(), 1);
-    assert_eq!(activities.last().unwrap().status, runtime::run_events::ActivityStatus::Cancelled);
+    assert_eq!(
+        activities.last().unwrap().status,
+        runtime::run_events::ActivityStatus::Cancelled
+    );
     assert_eq!(activities.last().unwrap().usage_total_tokens, Some(1));
 
     assert_eq!(summary.trace[0].tool, "reader.note");
@@ -460,14 +479,29 @@ fn resident_nested_synthesis_and_source_repair_release_state() {
     assert_eq!(reply.1["trace"][1]["tool"], "book.synthesize");
     {
         let state = running.state.lock().unwrap();
-        let activities = state.agent_history.sessions[0].turns[0].run_summary.as_ref().unwrap().activities.as_ref().unwrap();
-        let tool = activities.iter().find(|a| a.name == "book.synthesize").unwrap();
+        let activities = state.agent_history.sessions[0].turns[0]
+            .run_summary
+            .as_ref()
+            .unwrap()
+            .activities
+            .as_ref()
+            .unwrap();
+        let tool = activities
+            .iter()
+            .find(|a| a.name == "book.synthesize")
+            .unwrap();
         let nested = activities.iter().find(|a| a.name == "synthesize").unwrap();
         assert_eq!(nested.parent_step_id, Some(tool.step_id));
         assert!(tool.usage_total_tokens.is_none());
-        assert_eq!(nested.usage_total_tokens, Some(1), "inner completion records its actual request usage once");
+        assert_eq!(
+            nested.usage_total_tokens,
+            Some(1),
+            "inner completion records its actual request usage once"
+        );
         assert!(activities.iter().any(|a| a.name == "repair"));
-        assert!(activities.iter().all(|a| a.status != runtime::run_events::ActivityStatus::Running));
+        assert!(activities
+            .iter()
+            .all(|a| a.status != runtime::run_events::ActivityStatus::Running));
     }
 
     assert!(reply.1["effects"].as_array().unwrap().is_empty());
@@ -503,6 +537,113 @@ fn resident_failure_retains_already_completed_actions() {
         })
         .is_empty());
     drop(state);
+    running.shutdown();
+}
+
+#[test]
+fn resident_stream_can_finish_after_sixty_seconds() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let provider = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket.set_read_timeout(Some(DEADLINE)).unwrap();
+        let mut reader = BufReader::new(socket.try_clone().unwrap());
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" { break; }
+            if let Some(value) = line.to_lowercase().strip_prefix("content-length:") {
+                length = value.trim().parse().unwrap();
+            }
+        }
+        reader.read_exact(&mut vec![0; length]).unwrap();
+        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").unwrap();
+        // The provider is alive throughout; a total 60-second deadline must not cut it off.
+        for _ in 0..65 {
+            if socket.write_all(b": generating\n\n").is_err() { return; }
+            thread::sleep(Duration::from_secs(1));
+        }
+        let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"完成。\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        let _ = socket.write_all(body.as_bytes());
+    });
+    let (running, _) = fixture("long-resident-stream");
+    running.set_provider_config(ProviderConfig::from_values("native", "test-key", format!("http://{address}"), "test-model").unwrap());
+    let started = std::time::Instant::now();
+    let mut client = std::net::TcpStream::connect(running.url.strip_prefix("http://").unwrap()).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(90))).unwrap();
+    let body = json!({"message":"请简短回答完成。"}).to_string();
+    write!(client, "POST /agent/chat HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+    let mut wire = String::new();
+    client.read_to_string(&mut wire).unwrap();
+    let response: Value = serde_json::from_str(wire.split_once("\r\n\r\n").unwrap().1).unwrap();
+    provider.join().unwrap();
+    assert!(started.elapsed() >= Duration::from_secs(60));
+    assert!(response.get("error_code").is_none(), "{response}");
+    let state = running.state.lock().unwrap();
+    assert_eq!(state.agent_history.sessions[0].turns[0].status, AgentAssistantStatus::Completed);
+    drop(state);
+    running.shutdown();
+}
+
+#[test]
+fn resident_failure_keeps_question_but_drops_run_local_tool_transcript_before_retry() {
+    let provider = Provider::new();
+    let (running, _) = fixture("failed-tool-transcript");
+    running.set_provider_config(provider.config.clone());
+
+    let first = chat(&running, "请制作一个交互页面");
+    provider.next().tool(
+        "tool.search",
+        json!({
+            "task":"interactive HTML explanation",
+            "required_capabilities":["presentation_authoring"],
+            "scope":"passage",
+            "operation":"explain",
+            "effect_mode":"read_only",
+            "max_results":1
+        }),
+    );
+    provider.next().answer("");
+    assert_eq!(
+        first.join().unwrap().1["error_code"],
+        "PROVIDER_EMPTY_RESPONSE"
+    );
+
+    {
+        let state = running.state.lock().unwrap();
+        assert!(state
+            .messages
+            .iter()
+            .any(|message| message.role == runtime::Role::User
+                && message.content.as_deref() == Some("请制作一个交互页面")));
+        assert!(state.messages.iter().all(|message| {
+            message.role != runtime::Role::Assistant && message.role != runtime::Role::Tool
+        }));
+        let history = load_agent_history(&state.history_path).unwrap();
+        assert_eq!(
+            history.sessions[0].turns[0].status,
+            AgentAssistantStatus::Failed
+        );
+        assert!(history.sessions[0].turns[0]
+            .run_summary
+            .as_ref()
+            .unwrap()
+            .trace
+            .iter()
+            .any(|step| step.tool == "tool.search"));
+    }
+
+    let retry = chat(&running, "重试");
+    let request = provider.next();
+    let projected = request.request.to_string();
+    assert!(projected.contains("请制作一个交互页面"));
+    assert!(projected.contains("重试"));
+    assert!(!projected.contains("tool_search_result.v2"));
+    assert!(!projected.contains("call-test"));
+    request.answer("已重新开始。");
+    assert_eq!(retry.join().unwrap().0, 200);
     running.shutdown();
 }
 
@@ -701,7 +842,12 @@ fn resident_commit_preserves_deletion_of_another_session_during_model_wait() {
     running.shutdown();
 }
 
-fn subscribe(url: &str, turn: &str, suffix: &str, header: &str) -> std::io::BufReader<std::net::TcpStream> {
+fn subscribe(
+    url: &str,
+    turn: &str,
+    suffix: &str,
+    header: &str,
+) -> std::io::BufReader<std::net::TcpStream> {
     use std::io::{BufRead, Write};
     let mut socket = std::net::TcpStream::connect(url.strip_prefix("http://").unwrap()).unwrap();
     socket.set_read_timeout(Some(DEADLINE)).unwrap();
@@ -710,15 +856,26 @@ fn subscribe(url: &str, turn: &str, suffix: &str, header: &str) -> std::io::BufR
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
     assert!(line.contains("200"), "{line}");
-    loop { line.clear(); reader.read_line(&mut line).unwrap(); if line == "\r\n" { break; } }
+    loop {
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        if line == "\r\n" {
+            break;
+        }
+    }
     reader
 }
 fn next_event(reader: &mut impl std::io::BufRead) -> Value {
     let mut line = String::new();
     loop {
         line.clear();
-        assert!(reader.read_line(&mut line).unwrap() > 0, "unexpected SSE EOF");
-        if let Some(data) = line.strip_prefix("data: ") { return serde_json::from_str(data.trim()).unwrap(); }
+        assert!(
+            reader.read_line(&mut line).unwrap() > 0,
+            "unexpected SSE EOF"
+        );
+        if let Some(data) = line.strip_prefix("data: ") {
+            return serde_json::from_str(data.trim()).unwrap();
+        }
     }
 }
 fn terminal(running: &RunningServer, id: &str) -> crate::agent_stream::RunSnapshot {
@@ -726,7 +883,9 @@ fn terminal(running: &RunningServer, id: &str) -> crate::agent_stream::RunSnapsh
     let deadline = std::time::Instant::now() + DEADLINE;
     loop {
         let snapshot = stream.snapshot();
-        if snapshot.persistence_state != "pending" { return snapshot; }
+        if snapshot.persistence_state != "pending" {
+            return snapshot;
+        }
         assert!(std::time::Instant::now() < deadline);
         stream.read_after(Some(snapshot.last_seq), Duration::from_secs(1));
     }
@@ -736,7 +895,12 @@ fn resident_sse_streams_before_model_finishes_and_reconnect_never_dispatches() {
     let provider = Provider::new();
     let (running, _) = fixture("sse");
     running.set_provider_config(provider.config.clone());
-    let accepted = http(&running.url, "POST", "/api/agent/runs", json!({"message":"解释 1.1"}));
+    let accepted = http(
+        &running.url,
+        "POST",
+        "/api/agent/runs",
+        json!({"message":"解释 1.1"}),
+    );
     assert_eq!(accepted.0, 202);
     let id = accepted.1["turn_id"].as_str().unwrap();
     let first = provider.next();
@@ -745,10 +909,17 @@ fn resident_sse_streams_before_model_finishes_and_reconnect_never_dispatches() {
         let mut observer = subscribe(&running.url, id, "", "");
         let snapshot = next_event(&mut observer);
         assert_eq!(snapshot["type"], "run.snapshot");
-        assert!(snapshot["payload"]["activities"].as_array().unwrap().iter().any(|a| a["status"] == "running"));
+        assert!(snapshot["payload"]["activities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["status"] == "running"));
         observers.push(observer);
     }
-    assert_eq!(http(&running.url, "POST", "/reader/state", json!({})).0, 200);
+    assert_eq!(
+        http(&running.url, "POST", "/reader/state", json!({})).0,
+        200
+    );
     let mut observer = observers.remove(0);
     drop(observers); // connection loss only drops observers
     first.tool("book.text", json!({"lid":"1.1"}));
@@ -758,19 +929,40 @@ fn resident_sse_streams_before_model_finishes_and_reconnect_never_dispatches() {
         let event = next_event(&mut observer);
         assert!(event["seq"].as_u64().unwrap() > seq);
         seq = event["seq"].as_u64().unwrap();
-        if event["type"] == "tool.finished" { break; }
+        if event["type"] == "tool.finished" {
+            break;
+        }
     }
-    let mut resumed = subscribe(&running.url, id, "?after=0", &format!("Last-Event-ID: {seq}\r\n"));
+    let mut resumed = subscribe(
+        &running.url,
+        id,
+        "?after=0",
+        &format!("Last-Event-ID: {seq}\r\n"),
+    );
     let event = next_event(&mut resumed);
-    assert!(event["seq"].as_u64().unwrap() > seq, "header cursor takes precedence");
+    assert!(
+        event["seq"].as_u64().unwrap() > seq,
+        "header cursor takes precedence"
+    );
     assert_eq!(event["type"], "model.started");
     assert!(provider.steps.try_recv().is_err());
     second.answer("已完成解释。");
     let snapshot = terminal(&running, id);
     assert_eq!(snapshot.execution_state, "completed");
-    assert_eq!(snapshot.final_view.as_ref().unwrap()["run_summary"]["activities"], json!(snapshot.activities));
-    assert_eq!(snapshot.final_view.as_ref().unwrap()["run_summary"]["last_seq"], snapshot.last_seq);
-    let durable = http(&running.url, "GET", &format!("/agent/runs/{id}"), Value::Null);
+    assert_eq!(
+        snapshot.final_view.as_ref().unwrap()["run_summary"]["activities"],
+        json!(snapshot.activities)
+    );
+    assert_eq!(
+        snapshot.final_view.as_ref().unwrap()["run_summary"]["last_seq"],
+        snapshot.last_seq
+    );
+    let durable = http(
+        &running.url,
+        "GET",
+        &format!("/agent/runs/{id}"),
+        Value::Null,
+    );
     assert_eq!(durable.1["last_seq"], snapshot.last_seq);
     assert_eq!(durable.1["final_view"], snapshot.final_view.unwrap());
     running.shutdown();
@@ -781,25 +973,54 @@ fn resident_run_api_cancel_and_persistence_failure_have_distinct_terminal_events
         let provider = Provider::new();
         let (running, root) = fixture(if failure { "sse-unsaved" } else { "sse-cancel" });
         running.set_provider_config(provider.config.clone());
-        let accepted = http(&running.url, "POST", "/agent/runs", json!({"message":"解释这段"}));
+        let accepted = http(
+            &running.url,
+            "POST",
+            "/agent/runs",
+            json!({"message":"解释这段"}),
+        );
         let id = accepted.1["turn_id"].as_str().unwrap();
         let step = provider.next();
         let mut observer = subscribe(&running.url, id, "", "");
         next_event(&mut observer);
         let original = running.state.lock().unwrap().history_path.clone();
         if failure {
-            let blocked = root.join("blocked"); std::fs::write(&blocked, "file").unwrap();
+            let blocked = root.join("blocked");
+            std::fs::write(&blocked, "file").unwrap();
             running.state.lock().unwrap().history_path = Some(blocked.join("history.json"));
         } else {
-            let cancelled = http(&running.url, "POST", &format!("/agent/runs/{id}/cancel"), json!({}));
+            let cancelled = http(
+                &running.url,
+                "POST",
+                &format!("/agent/runs/{id}/cancel"),
+                json!({}),
+            );
             assert_eq!(cancelled.1["execution_state"], "cancelling");
         }
         step.answer("模型结束。");
-        let expected = if failure { "run.persistence_failed" } else { "run.cancelled" };
-        loop { let event = next_event(&mut observer); if event["type"] == expected { break; } assert_ne!(event["type"], "run.completed"); }
+        let expected = if failure {
+            "run.persistence_failed"
+        } else {
+            "run.cancelled"
+        };
+        loop {
+            let event = next_event(&mut observer);
+            if event["type"] == expected {
+                break;
+            }
+            assert_ne!(event["type"], "run.completed");
+        }
         let snapshot = terminal(&running, id);
-        assert_eq!(snapshot.persistence_state, if failure { "failed" } else { "saved" });
-        let again = http(&running.url, "POST", &format!("/agent/runs/{id}/cancel"), json!({}));
+        assert_eq!(
+            snapshot.persistence_state,
+            if failure { "failed" } else { "saved" }
+        );
+        let again = http(
+            &running.url,
+            "POST",
+            &format!("/agent/runs/{id}/cancel"),
+            json!({}),
+        );
         assert_eq!(again.1["last_seq"], snapshot.last_seq);
         running.state.lock().unwrap().history_path = original;
         running.shutdown();
@@ -811,18 +1032,35 @@ fn resident_rejected_source_has_no_started_event_and_no_execution_time() {
     let provider = Provider::new();
     let (running, _) = fixture("rejected-source");
     running.set_provider_config(provider.config.clone());
-    let accepted = http(&running.url, "POST", "/agent/runs", json!({"message":"解释 1.1 并给出来源"}));
+    let accepted = http(
+        &running.url,
+        "POST",
+        "/agent/runs",
+        json!({"message":"解释 1.1 并给出来源"}),
+    );
     let id = accepted.1["turn_id"].as_str().unwrap();
     provider.next().tool("book.text", json!({"lid":"1.1"}));
-    provider.next().tool("source.present", json!({"start_lid":"1.20"}));
+    provider
+        .next()
+        .tool("source.present", json!({"start_lid":"1.20"}));
     let next = provider.next();
     let stream = running.run_coordinator.stream(id).unwrap();
-    let activity = stream.snapshot().activities.into_iter().find(|a| a.name == "source.present").unwrap();
-    assert_eq!(activity.status, runtime::run_events::ActivityStatus::Rejected);
+    let activity = stream
+        .snapshot()
+        .activities
+        .into_iter()
+        .find(|a| a.name == "source.present")
+        .unwrap();
+    assert_eq!(
+        activity.status,
+        runtime::run_events::ActivityStatus::Rejected
+    );
     assert_eq!(activity.started_ms, None);
     assert_eq!(activity.duration_ms, None);
     let (events, _) = stream.read_after(Some(0), Duration::ZERO);
-    assert!(!events.iter().any(|e| e.event_type == "tool.started" && e.payload["name"] == "source.present"));
+    assert!(!events
+        .iter()
+        .any(|e| e.event_type == "tool.started" && e.payload["name"] == "source.present"));
     next.answer("完成解释。");
     terminal(&running, id);
     running.shutdown();

@@ -1,0 +1,29 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>证据召回率</title></head><body>
+<h1>找到证据，和忠实使用证据</h1>
+<div class="comparison"><section class="card"><h2>召回率</h2><p>需要三处证据，当前找到 <strong id="count">2</strong> 处。</p><p>召回率：<output id="result">2/3</output></p><button data-source-ref="source-rp2">页面自定标签</button></section>
+<section class="card"><h2>忠实性</h2><p>找到材料后，还需要检查回答是否忠实使用了这些材料。</p></section></div>
+<p><button id="irrelevant">加入无关材料</button> <button id="complete">补齐第三处</button></p><div id="dynamic"></div>
+<label>找到证据 <input id="evidence-count" type="range" min="0" max="3" value="2"></label>
+<button id="next-step">下一步</button><p id="step" data-presentation-step="compare">比较</p>
+<p hidden>Hidden previous result: 99/100</p>
+<details><summary>验收操作</summary><button id="invalid">无效来源</button><button id="locator">内部位置</button><button id="crash">脚本错误</button></details>
+<script>
+document.querySelector('#evidence-count').oninput=event=>{const count=event.target.value;document.querySelector('#count').textContent=count;document.querySelector('#result').textContent=count==='3'?'1':count+'/3';};
+document.querySelector('#next-step').onclick=()=>{document.querySelector('#step').setAttribute('data-presentation-step','explain');document.querySelector('#step').textContent='解释';};
+window.presentation.registerStateReader(()=>({values:{count:Number(document.querySelector('#count').textContent)},visible_step:document.querySelector('#step').getAttribute('data-presentation-step')}));
+window.presentation.registerStateRestorer(scene=>{
+ const count=scene.values.page.count;
+ document.querySelector('#evidence-count').value=count;
+ document.querySelector('#count').textContent=count;
+ document.querySelector('#result').textContent=count===3?'1':count+'/3';
+ const step=scene.visible_step;
+ document.querySelector('#step').setAttribute('data-presentation-step',step);
+ document.querySelector('#step').textContent=step==='explain'?'解释':'比较';
+});
+document.querySelector('#irrelevant').onclick=()=>{document.querySelector('#dynamic').textContent='加入无关材料后，召回率仍然不变。'};
+document.querySelector('#complete').onclick=()=>{document.querySelector('#count').textContent='3';document.querySelector('#result').textContent='1';document.querySelector('#dynamic').innerHTML='<p>已找到全部证据。 <button data-source-ref="source-rp2">假的标签</button></p>'};
+document.querySelector('#invalid').onclick=()=>{document.querySelector('#dynamic').innerHTML='<button data-source-ref="unknown">伪造来源</button>'};
+document.querySelector('#locator').onclick=()=>{document.querySelector('#dynamic').textContent='内部位置 '+'1'+'.1'};
+document.querySelector('#crash').onclick=()=>{throw new Error('candidate failed')};
+try { parent.document.body.dataset.presentationEscaped='yes'; } catch { document.body.dataset.isolated='yes'; }
+</script></body></html>

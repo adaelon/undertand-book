@@ -1371,7 +1371,7 @@ fn start_server_with_memory_path(
                             {
                                 Some(config) => ProviderRegistry::adapter_from_config_with_timeout(
                                     config,
-                                    crate::host_lifecycle::SERVICE_PROVIDER_TIMEOUT,
+                                    crate::host_lifecycle::RESIDENT_PROVIDER_TIMEOUT,
                                 ),
                                 None => Box::new(UnconfiguredAdapter),
                             };
@@ -2033,6 +2033,7 @@ mod tests {
                 updated_at: "0".into(),
                 turns: (1..=turns_per_session)
                     .map(|ordinal| AgentChatTurn {
+                        presentation_follow_up: None,
                         turn_id: format!("turn-review-{index}-{ordinal}"),
                         user_turn_ordinal: ordinal,
                         user: format!("I prefer worked examples {ordinal}"),

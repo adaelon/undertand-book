@@ -1155,6 +1155,7 @@ export interface AgentHistoryResponse {
   current: AgentChatSession;
 }
 export interface AgentChatMeta {
+  presentation_follow_up?: import("./generated/PresentationFollowUp").PresentationFollowUp;
   display_user?: string;
   question_anchor_lid?: string | null;
   question_quote?: AskQuote | null;
@@ -1406,6 +1407,12 @@ export const api = {
     http<AgentHistoryResponse>("POST", "/agent/history/delete", { session_id }),
   agentSourceResolve: (turn_id: string, source_ref_id: string) =>
     http<SourcePopupView>("POST", "/agent/source.resolve", { turn_id, source_ref_id }),
+  presentationRead: (session_id: string, turn_id: string, reference: import("./generated/PresentationRef").PresentationRef) =>
+    http<import("./generated/PresentationView").PresentationView>("POST", "/agent/presentation.read", { session_id, turn_id, reference }),
+  presentationSaveState: (session_id: string, turn_id: string, reference: import("./generated/PresentationRef").PresentationRef, state: import("./generated/PresentationState").PresentationState) =>
+    http<import("./generated/PresentationFollowUp").PresentationFollowUp>("POST", "/agent/presentation.state.save", { session_id, turn_id, reference, state }),
+  presentationObserve: (session_id: string, turn_id: string, reference: import("./generated/PresentationRef").PresentationRef, text: string, source_ref_ids: string[]) =>
+    http<{ accepted: boolean }>("POST", "/agent/presentation.observe", { session_id, turn_id, reference, text, source_ref_ids }),
   agentSourceOpen: (turn_id: string, source_ref_id: string) =>
     http<SourceOpenView>("POST", "/agent/source.open", { turn_id, source_ref_id }),
 };

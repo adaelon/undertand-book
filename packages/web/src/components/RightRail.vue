@@ -24,6 +24,7 @@ import type {
 import type { PdfAnnotationLocation } from "../pdf-annotation-projection";
 import { rangeToMarkdown } from "../selection";
 import AgentActivities from "./AgentActivities.vue";
+import AgentPresentation from "./AgentPresentation.vue";
 import type { RunActivity } from "../agent-run-state";
 import ProfileMemoryPanel from "./ProfileMemoryPanel.vue";
 import QueryAuditPanel from "./QueryAuditPanel.vue";
@@ -107,6 +108,7 @@ const props = defineProps<{
   intentArtifactsError?: string | null;
 }>();
 const emit = defineEmits<{
+  (e: "presentation-follow-up", message: string, receipt: import("../generated/PresentationFollowUp").PresentationFollowUp): void;
   (e: "update:agentInput", value: string): void;
   (e: "send-agent"): void;
   (e: "stop-agent"): void;
@@ -345,7 +347,7 @@ function onAgentSourceViewportResize() {
 window.addEventListener("resize", onAgentSourceViewportResize);
 onBeforeUnmount(() => window.removeEventListener("resize", onAgentSourceViewportResize));
 
-async function openAgentSources(turn: ChatTurn, sourceRefIds: string[], event: MouseEvent) {
+async function openAgentSources(turn: ChatTurn, sourceRefIds: string[], event: { currentTarget: EventTarget | null }) {
   if (!turn.turnId || sourceRefIds.length === 0) return;
   agentSourceAnchor = event.currentTarget as HTMLElement | null;
   const requestSequence = ++sourceRequestSequence;
@@ -409,7 +411,7 @@ watch(() => props.chat, () => {
   if (!popup) return;
   const turn = props.chat.find(turn => turn.turnId === popup.turnId);
   const view = turn?.pending ? turn.draft?.view : turn?.outcome?.answer_view;
-  if (!popup.sourceRefIds.every(id => view?.sources.some(source => source.source_ref_id === id))) closeAgentSourcePopup();
+  if (!view?.parts.some(part => part.kind === 'presentation') && !popup.sourceRefIds.every(id => view?.sources.some(source => source.source_ref_id === id))) closeAgentSourcePopup();
 }, { deep: true });
 
 function onAnswerMouseUp(turn: ChatTurn) {
@@ -634,7 +636,7 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
               <template v-if="part.kind === 'markdown'">
                 <div v-for="(block, bi) in draftMarkdownBlocks(part.text)" :key="bi" v-memo="[block]" class="answer-markdown" v-html="block"></div>
               </template>
-              <button v-else type="button" class="agent-source-button draft-source" @click.stop="openAgentSources(turn, part.source_ref_ids, $event)">{{ part.source_ref_ids.map(id => turn.draft?.view?.sources.find(s => s.source_ref_id === id)?.label).filter(Boolean).join(' · ') }}</button>
+              <button v-else-if="part.kind === 'sources'" type="button" class="agent-source-button draft-source" @click.stop="openAgentSources(turn, part.source_ref_ids, $event)">{{ part.source_ref_ids.map(id => turn.draft?.view?.sources.find(s => s.source_ref_id === id)?.label).filter(Boolean).join(' · ') }}</button>
             </template>
           </div>
           <p v-if="!turn.pending && turn.error" class="incomplete">{{ turn.error }}</p>
@@ -649,7 +651,7 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
                   v-html="props.renderMarkdown(part.text)"
                 ></div>
                 <button
-                  v-else
+                  v-else-if="part.kind === 'sources'"
                   type="button"
                   class="agent-source-button"
                   :disabled="!turn.turnId"
@@ -658,6 +660,10 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
                   <BookOpen :size="14" aria-hidden="true" />
                   <span>{{ sourceButtonLabel(turn.outcome, part.source_ref_ids) }}</span>
                 </button>
+                <AgentPresentation v-else-if="part.kind === 'presentation' && turn.turnId"
+                  :session-id="props.activeChatSessionId" :turn-id="turn.turnId" :reference="part"
+                  :busy="props.sending" @follow-up="(message, receipt) => emit('presentation-follow-up', message, receipt)"
+                  @source="(id, anchor) => openAgentSources(turn, [id], { currentTarget: anchor })" />
               </template>
             </div>
             <p v-else class="ans-text">暂无回答。</p>
@@ -1066,6 +1072,12 @@ function influenceLabel(influence: ProfileUsageTrace["influences"][number]): str
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+/* A backdrop filter makes fixed children relative to the rail. Keep the live
+   iframe in place when expanding, but release that containing block. */
+.right-rail:has(.agent-presentation.expanded) {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 .context-tabs {
   flex: 0 0 auto;

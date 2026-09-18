@@ -71,7 +71,7 @@ export function runStatusText(snapshot: RunSnapshot, connection: string): string
   if (snapshot.persistence_state === "failed") return "运行已结束，但结果未保存";
   if (snapshot.execution_state === "cancelled") return "已停止";
   if (snapshot.execution_state === "failed") return "运行失败";
-  if (snapshot.execution_state === "completed") return "已完成";
+  if (snapshot.execution_state === "completed") return "运行已结束";
   if (snapshot.execution_state === "cancelling") return "正在停止，等待当前请求退出";
   if (snapshot.execution_state === "finalizing") return "正在保存结果";
   if (connection === "reconnecting") return "连接中断，正在恢复活动";

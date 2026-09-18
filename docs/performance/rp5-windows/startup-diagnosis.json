@@ -1,0 +1,30 @@
+{
+  "checked_at_local": "2026-09-17 08:34",
+  "test_executable": "D:/codex-build/understand-book-rp2/target/debug/deps/server-e79cff85e0e42972.exe",
+  "previously_observed_test_size_bytes": 33422848,
+  "quarantine_candidates": [
+    {
+      "path": "C:\\$360Section\\360.746F4D662B3BBC82278C3FD8C46351F9.q3q",
+      "size_bytes": 33422848,
+      "modified_local": "2026-09-17T08:19:53"
+    },
+    {
+      "path": "C:\\$360Section\\360.21891882C99A4E740F4C1BE68698196B.q3q",
+      "size_bytes": 33422848,
+      "modified_local": "2026-09-17T08:20:27"
+    }
+  ],
+  "running_processes_observed": [
+    "360tray.exe",
+    "HipsTray.exe",
+    "HipsDaemon.exe"
+  ],
+  "stopped_services_observed": [
+    "avast! Antivirus",
+    "kxescore",
+    "WinDefend"
+  ],
+  "huorong_target_log_and_quarantine_matches": 0,
+  "windows_target_period_defender_and_code_integrity_events_found": 0,
+  "conclusion": "Strong temporal and size evidence for 360 quarantine; original-path and detection-name mapping not yet decoded. No exclusions, restoration or protection settings changed."
+}

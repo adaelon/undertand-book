@@ -19,6 +19,26 @@ fn main() {
             }
         }
     }
+    if std::env::args().nth(1).as_deref() == Some("--presentation-preview-probe") {
+        #[cfg(target_os = "linux")]
+        let result = std::thread::scope(|scope| {
+            let cancellation = runtime::run_context::CancellationToken::default();
+            let worker_token = cancellation.clone();
+            let worker = scope.spawn(move || {
+                server::presentation_preview::run_probe_with_cancellation(&worker_token)
+            });
+            while !worker.is_finished() {
+                if STOP_REQUESTED.load(std::sync::atomic::Ordering::Acquire) {
+                    cancellation.cancel();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            worker.join().unwrap_or(1)
+        });
+        #[cfg(not(target_os = "linux"))]
+        let result = server::presentation_preview::run_probe();
+        std::process::exit(result);
+    }
     let (book_dir, reader_only) = parse_args(std::env::args().skip(1), std::env::var("UNDERSTAND_BOOK_DIR").ok())
         .unwrap_or_else(|error| {
             eprintln!("{error}");

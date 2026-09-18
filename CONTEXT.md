@@ -762,3 +762,21 @@ Resident 模型—工具循环用尽最后一个合法工具批次后，由 Runt
 
 ## 结构关系增量
 基于已交付结构条目及证据形成的主题新建、扩展、合并或阅读依赖补充。它表达局部结构之间新判断的关系，不是三个完整清单的替换结果。状态：NEW（[ADR-0129](docs/adr/0129-append-book-structure-and-reconcile-relations.md)，已接受设计，2026-09-14）。
+
+## TutorPresentation
+`TutorLoop` 把已采用 `TeachingMove` 实际交付到用户界面后形成的教学内容与交互条件，包括 Agent 生成的问题、提示、解释、反馈，所选择的书内片段、图示或其他材料，用户当时可用的回答方式，以及回答前已获得的 assistance；采用 AgentPresentation 时关联其实际交付版本与交互现场。它记录 Learner 行为发生前真正看到了什么，不包含未采用候选；书源与 Agent 生成内容保持来源差异，内容已交付不证明用户看完、理解或掌握。状态:BOUNDARY_CHANGE(见 `grill.md` Q82/Q83/Q85/Q102、[ADR-0130](docs/adr/0130-agent-rich-presentation-and-read-time-authoring.md))。
+
+## PresentationFrame
+`TutorLoop` 将已采用 `TeachingMove` 渲染为 `TutorPresentation` 时使用的可选体验框架，可表达沟通风格、Tutor voice、人物设定、关系语境与交付模态。它只能改变呈现方式，不得改变目标认知活动、来源主张、assistance 暴露、`AssessmentContract` 或 `LearningEvidence`；人物关注、好感、失望及参与时长也不得成为对象级能力证据或学习奖惩。状态:NEW(见 `grill.md` Q85)。
+
+## TutorInteraction
+`TutorPresentation` 中确有必要使用专门用户界面时的结构化教学交互，承载自由回答、单选、多选、排序、匹配、证据选择或自评等有界、版本化行为；其视觉呈现可采用现场生成的 AgentPresentation，实际题面、材料、来源、回答条件、assistance 及提交、改答、跳过、请求提示仍与对应呈现保持类型化关联。它服务于稀疏诊断、回忆或明确需要结构化作答的场景，不是 `TutorLoop` 的默认教学外壳或 Reader 副作用；视觉自由不授予新的判题或学习状态语义，普通思考引导与解释继续自动记录实际呈现。状态:BOUNDARY_CHANGE(见 `grill.md` Q83/Q85/Q102、[ADR-0130](docs/adr/0130-agent-rich-presentation-and-read-time-authoring.md))。
+
+## Agent 呈现内容 (AgentPresentation)
+Agent 围绕当前阅读问题交付、与对话关联且可继续修改的内容对象，可承载富排版回答、交互讲解、可运行教具和持续更新的资料。它保留内容版本、来源与模型补充的区别；普通呈现不等同于正式教学活动或公共书源。状态:NEW（[ADR-0130](docs/adr/0130-agent-rich-presentation-and-read-time-authoring.md)，已接受设计，2026-09-16）。
+
+## 呈现现场 (PresentationState)
+某一 AgentPresentation 版本在实际使用中的可观察状态，包括当前参数、选项、步骤和显示结果，是继续解释或修改该内容的共同参照。它记录发生了什么，不直接判断读者是否理解；用于正式教学时关联相应实际呈现条件。状态:NEW（[ADR-0130](docs/adr/0130-agent-rich-presentation-and-read-time-authoring.md)，已接受设计，2026-09-16）。
+
+## 交互教具
+AgentPresentation 用于支持观察、比较、试验、推理或构造理解的教学用途，可由当前问题现场形成并继续调整。它具有可操作对象和可观察反馈，是否形成正式学习证据由相应教学活动与用户表现决定。状态:NEW（[ADR-0130](docs/adr/0130-agent-rich-presentation-and-read-time-authoring.md)，已接受设计，2026-09-16）。

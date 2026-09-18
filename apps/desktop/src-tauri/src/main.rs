@@ -668,6 +668,9 @@ fn web_dist(app: &tauri::App) -> Result<PathBuf, String> {
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--presentation-preview-probe") {
+        std::process::exit(server::presentation_preview::run_probe());
+    }
     if let Some(exit_code) = handle_maintenance_command() {
         std::process::exit(exit_code);
     }

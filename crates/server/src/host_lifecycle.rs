@@ -6,6 +6,9 @@ use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::Duration;
 
 pub(crate) const SERVICE_PROVIDER_TIMEOUT: Duration = Duration::from_secs(60);
+// Interactive authoring can stream a complete page for longer than background work.
+// This remains a total request deadline, including reading the response body.
+pub(crate) const RESIDENT_PROVIDER_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub(crate) struct ServiceAdapter {
     inner: Box<dyn ModelAdapter + Send>,

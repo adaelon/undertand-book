@@ -180,6 +180,12 @@ mod tests {
 
 /// An operation must be deterministic: model calls run after this borrow ends.
 pub trait ResidentStatePort {
+    fn author_presentation(&mut self, _request: crate::presentation_author::AuthorRequest,
+        _bindings: &[crate::orchestrator::SourceBinding], _messages: &[Message],
+        _cancellation: &CancellationToken) -> Result<crate::presentation_author::AuthorResult, read_tools::ToolError> {
+        Err(crate::presentation_author::unavailable())
+    }
+
     fn with_state<R>(&mut self, operation: impl FnOnce(&mut MemoryStore, &mut Reader) -> R) -> R;
 }
 
@@ -195,6 +201,10 @@ impl ResidentStatePort for BorrowedResidentState<'_> {
 }
 
 pub struct RunContext {
+    pub(crate) presentation_images: Vec<crate::presentation_author::PreviewImage>,
+    pub(crate) pending_preview: Option<String>,
+    pub(crate) inspected_presentations: std::collections::HashSet<String>,
+    pub(crate) delivered_presentations: Vec<crate::presentation::PresentationRef>,
     pub messages: Vec<Message>,
     pub config: OuterConfig,
     pub runtime_profile: ModelRuntimeProfile,
@@ -249,6 +259,10 @@ impl RunContext {
         runtime_profile: ModelRuntimeProfile,
     ) -> Self {
         Self {
+            presentation_images: Vec::new(),
+            pending_preview: None,
+            inspected_presentations: Default::default(),
+            delivered_presentations: Vec::new(),
             messages,
             config,
             runtime_profile,

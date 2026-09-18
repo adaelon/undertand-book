@@ -3148,7 +3148,7 @@ async function applyPendingLayoutProposal(proposal = pendingLayoutProposal.value
   const st = await api.state();
   await applyReaderState(st);
 }
-async function submitAgentMessage(msg: string, displayUser: string, draft: AskDraft | null) {
+async function submitAgentMessage(msg: string, displayUser: string, draft: AskDraft | null, presentationFollowUp?: import("./generated/PresentationFollowUp").PresentationFollowUp) {
   if (sending.value) return;
   const questionAnchorLid = draft?.lid ?? selectedLid.value ?? viewport.value?.top_lid ?? null;
   const turn: ChatTurn = {
@@ -3166,6 +3166,7 @@ async function submitAgentMessage(msg: string, displayUser: string, draft: AskDr
   banner.value = "";
   try {
     const result = await api.agentRunCreate(msg, {
+      presentation_follow_up: presentationFollowUp,
       display_user: displayUser, question_anchor_lid: questionAnchorLid,
       question_quote: draft ? { ...draft } : null,
     });
@@ -3196,6 +3197,11 @@ async function sendAgent() {
   agentInput.value = "";
   askDraft.value = null;
   await submitAgentMessage(msg, msg, draft);
+}
+
+async function sendPresentationFollowUp(message: string, receipt: import("./generated/PresentationFollowUp").PresentationFollowUp) {
+  if (receipt.session_id !== activeChatSessionId.value || sending.value) return;
+  await submitAgentMessage(message, message, null, receipt);
 }
 
 async function confirmSensitiveProfile() {
@@ -4102,6 +4108,7 @@ async function submitOpenBook(dir = bookPickerDir.value) {
         :intent-artifacts-loading="intentArtifactsLoading"
         :intent-artifacts-error="intentArtifactsError"
         @send-agent="sendAgent"
+        @presentation-follow-up="sendPresentationFollowUp"
         @new-chat="newChat"
         @select-chat="selectChat"
         @delete-chat="deleteChat"

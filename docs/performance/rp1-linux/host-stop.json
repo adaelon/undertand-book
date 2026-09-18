@@ -1,0 +1,13 @@
+{
+  "status": "passed",
+  "signal": "SIGTERM",
+  "elapsed_ms": 2129,
+  "exit_code": 1,
+  "remaining_preview_processes": [],
+  "temporary_profiles_cleaned": true,
+  "result": {
+    "candidate_id": "rp1-host-stop",
+    "phase": "load",
+    "message": "AGENT_RUN_CANCELLED"
+  }
+}

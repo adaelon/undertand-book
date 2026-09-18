@@ -4,6 +4,8 @@ Status: Accepted, 2026-07-29.
 Revises: ADR-0093 §§4、6 and the fixed four-type target-artifact contract.
 Change type: 边界重构。
 
+后续边界：[ADR-0130](0130-agent-rich-presentation-and-read-time-authoring.md) 为读时富呈现与可执行内容建立独立能力，采用本 ADR §4 的非数据型能力出口；本 ADR 对 ArtifactBlueprint 的数据合同限制继续成立。
+
 现有 Planner、BuildPlan 与 artifact gate 实际只执行 timeline、concept map、comparison table、argument map 四类结构,顶层 `custom` 只是不可执行枚举。用户已在 Codex task `019fac59-f620-7233-8332-03df320ca875` 确认:产物应由 Codex 按目标设计,Runtime 继续拥有确定性验收权。实施顺序见[切片方案](../切片方案-需求驱动产物Blueprint与Agent访问.md)。
 
 ### §1 目标驱动 Blueprint

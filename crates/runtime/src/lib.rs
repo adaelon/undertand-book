@@ -28,6 +28,9 @@ pub mod memory_review;
 pub mod model_runtime;
 pub mod orchestrator;
 pub mod run_context;
+pub mod presentation_preview;
+pub mod presentation;
+pub mod presentation_author;
 pub mod run_events;
 pub mod profile_api;
 pub mod profile_context;
@@ -3197,6 +3200,16 @@ impl ModelAdapter for NativeAdapter {
     }
 }
 
+fn append_preview_images(messages: &mut Vec<serde_json::Value>, request: &AgentRequestPlan) {
+    if request.preview_images.is_empty() { return; }
+    let mut content = Vec::new();
+    for image in &request.preview_images {
+        content.push(serde_json::json!({"type":"text", "text":image.caption}));
+        content.push(serde_json::json!({"type":"image_url", "image_url":{"url":format!("data:image/png;base64,{}",image.png_base64),"detail":"high"}}));
+    }
+    messages.push(serde_json::json!({"role":"user", "content":content}));
+}
+
 fn native_chat_request_projection(
     model: &str,
     request: &AgentRequestPlan,
@@ -3222,11 +3235,12 @@ fn native_chat_request_projection(
             })
         })
         .collect();
-    let msgs: Vec<serde_json::Value> = request
+    let mut msgs: Vec<serde_json::Value> = request
         .ordered_messages()
         .iter()
         .map(|m| native_message_to_json(m, &internal_to_provider))
         .collect();
+    append_preview_images(&mut msgs, request);
     let mut body = serde_json::json!({
         "model": model,
         "messages": msgs,
@@ -3288,6 +3302,7 @@ fn react_chat_request_projection(model: &str, request: &AgentRequestPlan) -> ser
         ),
     }));
     msgs.extend(messages.iter().map(react_message_to_json));
+    append_preview_images(&mut msgs, request);
     let mut body = serde_json::json!({
         "model": model,
         "messages": msgs,

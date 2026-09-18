@@ -21,6 +21,7 @@ pub enum ToolHandlerId {
     Artifact(ArtifactToolId),
     ToolSearch,
     SourcePresent,
+    PresentationAuthor,
     ProfileManifest,
     ProfileMarkUsed,
     BookRouteFrom,
@@ -39,7 +40,7 @@ pub enum ToolHandlerId {
 }
 
 impl ToolHandlerId {
-    pub const ALL: [ToolHandlerId; 31] = [
+    pub const ALL: [ToolHandlerId; 32] = [
         ToolHandlerId::Book(BookToolId::Query),
         ToolHandlerId::Book(BookToolId::Synthesize),
         ToolHandlerId::Book(BookToolId::SearchText),
@@ -49,6 +50,7 @@ impl ToolHandlerId {
         ToolHandlerId::Artifact(ArtifactToolId::Search),
         ToolHandlerId::Artifact(ArtifactToolId::Read),
         ToolHandlerId::SourcePresent,
+        ToolHandlerId::PresentationAuthor,
         ToolHandlerId::Book(BookToolId::Context),
         ToolHandlerId::Book(BookToolId::Concept),
         ToolHandlerId::Book(BookToolId::Structure),
@@ -81,6 +83,7 @@ impl ToolHandlerId {
                 .expect("registered Book handler must have a Resident alias"),
             ToolHandlerId::Artifact(id) => artifact_aliases(id).resident,
             ToolHandlerId::ToolSearch => "tool.search",
+            ToolHandlerId::PresentationAuthor => "presentation.author",
             ToolHandlerId::SourcePresent => "source.present",
             ToolHandlerId::ProfileManifest => "profile.manifest",
             ToolHandlerId::ProfileMarkUsed => "profile.mark_used",
@@ -186,6 +189,7 @@ pub enum ToolCapability {
     NavigationPlan,
     ArtifactRead,
     SourcePresentation,
+    PresentationAuthoring,
     ProfileRead,
     ProfileTrace,
     MemoryRead,
@@ -195,7 +199,7 @@ pub enum ToolCapability {
 }
 
 impl ToolCapability {
-    pub const ALL: [ToolCapability; 15] = [
+    pub const ALL: [ToolCapability; 16] = [
         Self::Discovery,
         Self::SourceRead,
         Self::LexicalLocate,
@@ -205,6 +209,7 @@ impl ToolCapability {
         Self::NavigationPlan,
         Self::ArtifactRead,
         Self::SourcePresentation,
+        Self::PresentationAuthoring,
         Self::ProfileRead,
         Self::ProfileTrace,
         Self::MemoryRead,
@@ -223,6 +228,7 @@ impl ToolCapability {
             Self::Synthesis => "synthesis",
             Self::NavigationPlan => "navigation_plan",
             Self::ArtifactRead => "artifact_read",
+            Self::PresentationAuthoring => "presentation_authoring",
             Self::SourcePresentation => "source_presentation",
             Self::ProfileRead => "profile_read",
             Self::ProfileTrace => "profile_trace",
@@ -317,6 +323,7 @@ pub enum ToolEffect {
     ProfileUsageTrace,
     MemoryWrite,
     ReaderWrite,
+    PresentationWrite,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -447,6 +454,7 @@ impl ToolRegistration {
         match self.spec.name.as_str() {
             "book.query" => "检索书内证据", "book.synthesize" => "综合原文", "book.text" => "读取原文",
             "book.search_text" => "搜索原文", "book.structure" => "查看书籍结构", "source.present" => "整理来源",
+            "presentation.author" => "制作与预览内容",
             "tool.search" => "查找可用工具", "reader.note" => "保存笔记", "reader.highlight" => "添加高亮",
             "reader.gotoLid" | "reader.scroll" => "调整阅读位置", "reader.state" => "查看阅读状态",
             name if name.starts_with("artifact.") => "读取学习成果",
@@ -692,6 +700,7 @@ fn registration_for(spec: ToolSpec, handler: ToolHandlerId) -> ToolRegistration 
             ResultPolicy::ToolDiscovery,
             Parallelism::SequentialOnly,
         ),
+        Handler::PresentationAuthor => (ToolValidatorId::JsonSchema, ResultPolicy::EvidenceProjection, Parallelism::SequentialOnly),
         Handler::SourcePresent => (
             ToolValidatorId::SourcePresentation,
             ResultPolicy::SourceReference,
@@ -821,6 +830,7 @@ fn capability_migration(handler: ToolHandlerId) -> CapabilityMigration {
             migration(vec![Legacy::ArtifactRead], vec![Capability::ArtifactRead])
         }
         Handler::ToolSearch => migration(vec![Legacy::Discovery], vec![Capability::Discovery]),
+        Handler::PresentationAuthor => migration(vec![Legacy::SourcePresentation], vec![Capability::PresentationAuthoring]),
         Handler::SourcePresent => migration(
             vec![Legacy::SourcePresentation],
             vec![Capability::SourcePresentation],
@@ -1091,6 +1101,7 @@ fn routing_shape(handler: ToolHandlerId) -> RoutingShape {
             all_profiles(),
             Cost::Low,
         ),
+        Handler::PresentationAuthor => shape(vec![Scope::Selection, Scope::Passage, Scope::Section, Scope::Document], vec![Operation::Explain, Operation::Compare, Operation::Summarize], Effect::PresentationWrite, vec![Precondition::BookAvailable], all_profiles(), Cost::High),
         Handler::SourcePresent => shape(
             vec![
                 Scope::Selection,
@@ -1299,6 +1310,7 @@ fn non_book_routing_guidance(handler: ToolHandlerId) -> (&'static str, &'static 
             "Read bounded artifact records returned by artifact.search or its continuation.",
             "Do not invent opaque refs or treat artifact records as canonical book evidence.",
         ),
+        Handler::PresentationAuthor => ("Create and rehearse rich HTML answers and interactive explanations.", "Do not use for a short plain answer or persist an untested candidate."),
         Handler::SourcePresent => (
             "Present an opaque user-visible source reference for evidence already observed in this turn.",
             "Do not present an unobserved LID or use source presentation as evidence retrieval.",
@@ -1735,6 +1747,7 @@ mod tests {
             ("artifact.list", &["artifact_read"], &["artifact_read"]),
             ("artifact.search", &["artifact_read"], &["artifact_read"]),
             ("artifact.read", &["artifact_read"], &["artifact_read"]),
+            ("presentation.author", &["source_presentation"], &["presentation_authoring"]),
             (
                 "source.present",
                 &["source_presentation"],

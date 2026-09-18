@@ -1,0 +1,67 @@
+{
+  "elapsed_ms": 119365,
+  "http_status": 200,
+  "model": "deepseek-v4-flash",
+  "saw_failure": true,
+  "saw_images": true,
+  "writes": 2,
+  "turns": 7,
+  "tokens_spent": 185457,
+  "incomplete": false,
+  "tools": [
+    {
+      "tool": "tool.search",
+      "args": {
+        "effect_mode": "read_only",
+        "max_results": 6,
+        "operation": "explain",
+        "required_capabilities": [
+          "presentation_authoring"
+        ],
+        "scope": "document"
+      }
+    },
+    {
+      "tool": "presentation.author",
+      "args": {
+        "candidate_id": null,
+        "operation": "write"
+      }
+    },
+    {
+      "tool": "presentation.author",
+      "args": {
+        "candidate_id": "candidate-1789597841943503600-1",
+        "operation": "preview"
+      }
+    },
+    {
+      "tool": "presentation.author",
+      "args": {
+        "candidate_id": null,
+        "operation": "write"
+      }
+    },
+    {
+      "tool": "presentation.author",
+      "args": {
+        "candidate_id": "candidate-1789597870309157500-3",
+        "operation": "preview"
+      }
+    },
+    {
+      "tool": "presentation.author",
+      "args": {
+        "candidate_id": "candidate-1789597870309157500-3",
+        "operation": "deliver"
+      }
+    }
+  ],
+  "delivered_references": [
+    {
+      "kind": "presentation",
+      "presentation_id": "presentation-1789597870309153400-2",
+      "revision": 1
+    }
+  ]
+}

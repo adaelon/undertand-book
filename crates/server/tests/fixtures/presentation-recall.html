@@ -1,0 +1,26 @@
+<!doctype html><html lang="zh"><meta charset="utf-8"><title>证据召回率</title>
+<style>
+body{margin:32px;background:#f5f3ee;color:#193c38;font:20px system-ui}
+main{max-width:820px;background:white;padding:24px;border-radius:18px}
+h1{font-size:30px;margin-top:0}.columns{display:flex;gap:32px}.columns>section{flex:1}
+button,input{font:inherit;margin:8px 8px 8px 0}button{padding:8px 12px}
+output{display:block;font-size:28px;font-weight:600}canvas{width:360px;height:120px}
+</style><main><h1>找到证据 ≠ 忠实使用证据</h1><div class="columns"><section>
+<p id="found"></p><label>找到的证据 <input id="count" type="range" min="0" max="3" value="2"></label>
+<button id="irrelevant">加入无关材料</button><button id="complete">补齐第三处</button>
+<output id="result"></output><p id="extra"></p></section><section>
+<canvas id="chart" width="360" height="120" aria-label="三份所需证据的召回比例"></canvas>
+<p>无关材料不会增加召回率。找到证据后，还要忠实使用它。</p>
+</section></div></main><script>
+let extras=0;const count=document.querySelector('#count');
+function render(){
+ const n=Number(count.value);document.querySelector('#result').value=`召回率：${n}/3 = ${(n/3).toFixed(3)}`;
+ document.querySelector('#found').textContent=`需要三处证据，当前已找到 ${n} 处。`;
+ document.querySelector('#extra').textContent=`无关材料：${extras}`;
+ const c=document.querySelector('canvas').getContext('2d');c.clearRect(0,0,360,120);
+ for(let i=0;i<3;i++){c.fillStyle=i<n?'#177d70':'#e2e7e3';c.fillRect(i*120+4,24,108,72);}
+}
+count.addEventListener('input',render);
+document.querySelector('#irrelevant').onclick=()=>{extras++;render()};
+document.querySelector('#complete').onclick=()=>{count.value=3;render()};render();
+</script></html>

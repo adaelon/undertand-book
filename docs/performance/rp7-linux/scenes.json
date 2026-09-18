@@ -1,0 +1,88 @@
+[
+  {
+    "name": "rich",
+    "elapsed_ms": 152679,
+    "samples": 13,
+    "total_tokens": 363049
+  },
+  {
+    "name": "rich",
+    "elapsed_ms": 60232,
+    "samples": 8,
+    "total_tokens": 128144,
+    "delivered": true
+  },
+  {
+    "name": "experiment",
+    "elapsed_ms": 71900,
+    "samples": 9,
+    "total_tokens": 183634,
+    "delivered": true
+  },
+  {
+    "name": "follow-up",
+    "elapsed_ms": 9291,
+    "samples": 5,
+    "total_tokens": 65036,
+    "delivered": true
+  },
+  {
+    "name": "revision",
+    "elapsed_ms": 104337,
+    "samples": 15,
+    "total_tokens": 469262
+  },
+  {
+    "name": "revision",
+    "elapsed_ms": 57391,
+    "samples": 11,
+    "total_tokens": 334044
+  },
+  {
+    "name": "revision",
+    "elapsed_ms": 75657,
+    "samples": 14,
+    "total_tokens": 514235
+  },
+  {
+    "name": "revision",
+    "elapsed_ms": 120799,
+    "samples": 15,
+    "total_tokens": 579662
+  },
+  {
+    "name": "revision",
+    "elapsed_ms": 40340,
+    "samples": 7,
+    "total_tokens": 324291,
+    "delivered": true
+  },
+  {
+    "name": "layout-revision",
+    "elapsed_ms": 64139,
+    "samples": 9,
+    "total_tokens": 441393,
+    "delivered": true
+  },
+  {
+    "name": "argument",
+    "elapsed_ms": 57222,
+    "samples": 9,
+    "total_tokens": 447468,
+    "delivered": true
+  },
+  {
+    "name": "argument-state-revision",
+    "elapsed_ms": 47579,
+    "samples": 9,
+    "total_tokens": 500076,
+    "delivered": true
+  },
+  {
+    "name": "experiment-state-revision",
+    "elapsed_ms": 49594,
+    "samples": 9,
+    "total_tokens": 548913,
+    "delivered": true
+  }
+]

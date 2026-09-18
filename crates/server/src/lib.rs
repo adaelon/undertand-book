@@ -75,6 +75,10 @@ use std::time::Duration;
 pub mod host;
 pub mod agent_run;
 pub mod agent_stream;
+pub mod presentation_preview;
+pub mod presentation_store;
+mod presentation_api;
+mod presentation_author;
 mod host_lifecycle;
 pub mod mcp;
 
@@ -948,6 +952,8 @@ pub struct AgentTurnError {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AgentChatTurn {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation_follow_up: Option<runtime::presentation::PresentationFollowUp>,
     #[serde(default)]
     pub turn_id: String,
     #[serde(default)]
@@ -1464,6 +1470,7 @@ fn precommit_agent_turn(
     user: String,
     question_anchor_lid: Option<String>,
     question_quote: Option<AskQuote>,
+    presentation_follow_up: Option<runtime::presentation::PresentationFollowUp>,
     now: &str,
 ) -> Result<AgentTurnRef, ToolError> {
     let mut candidate = state.agent_history.clone();
@@ -1482,6 +1489,7 @@ fn precommit_agent_turn(
     }
     session.updated_at = now.into();
     session.turns.push(AgentChatTurn {
+        presentation_follow_up,
         turn_id: turn_id.clone(),
         user_turn_ordinal,
         user,
@@ -1555,6 +1563,9 @@ fn finalize_agent_turn(
         .as_mut()
         .map(|outcome| std::mem::take(&mut outcome.source_bindings))
         .unwrap_or_default();
+    if let Some(outcome) = &outcome {
+        presentation_store::validate_answer_references(state, &turn_ref.session_id, outcome, messages, &turn.source_bindings)?;
+    }
     turn.outcome = outcome;
     turn.error = error;
     validate_agent_turn(turn)?;
@@ -2525,6 +2536,14 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
             return agent_method_not_allowed();
         }
         return route_agent_source_resolve(state, req.body);
+    }
+    if path == "/agent/presentation.state.save" {
+        if req.method != "POST" { return agent_method_not_allowed(); }
+        return presentation_api::save_state(state, req.body);
+    }
+    if path == "/agent/presentation.read" || path == "/agent/presentation.observe" {
+        if req.method != "POST" { return agent_method_not_allowed(); }
+        return presentation_api::route(state, req.body, path.ends_with(".observe"));
     }
     if path == "/agent/source.open" {
         if req.method != "POST" {
@@ -11178,7 +11197,7 @@ fn agent_source_binding(
                 })
             })
     });
-    binding.ok_or_else(|| ToolError {
+    binding.or_else(|| presentation_api::source_binding(state, &request.turn_id, &request.source_ref_id)).ok_or_else(|| ToolError {
         error_code: "SOURCE_REF_NOT_FOUND".into(),
         category: "not_found".into(),
         message: "source reference does not belong to this turn".into(),
@@ -11331,7 +11350,23 @@ fn prepare_agent_chat(
             )));
         }
     }
-    let agent_message = agent_question_with_provenance(msg, question_quote.as_ref());
+    let presentation_follow_up = v.get("presentation_follow_up").filter(|value| !value.is_null())
+        .map(|value| serde_json::from_value::<runtime::presentation::PresentationFollowUp>(value.clone()))
+        .transpose().map_err(|_| validation("PRESENTATION_INVALID", "Invalid presentation receipt"))?;
+    let mut agent_message = agent_question_with_provenance(msg, question_quote.as_ref());
+    if let Some(session) = state.agent_history.active_by_book.get(&state.book.base.book_id)
+        .and_then(|id| state.agent_history.sessions.iter().find(|s| &s.id == id)) {
+        let recent: Vec<_> = session.turns.iter().rev().filter_map(|turn| turn.outcome.as_ref()
+            .and_then(|o| o.answer_view.as_ref()).map(|view| (turn, view)))
+            .flat_map(|(turn, view)| view.parts.iter().filter_map(move |part| match part {
+                AgentAnswerPart::Presentation { presentation_id, revision } => Some(json!({"turn_id":turn.turn_id,"reference":{"presentation_id":presentation_id,"revision":revision}})),
+                _ => None,
+            })).take(8).collect();
+        if !recent.is_empty() { agent_message.push_str(&format!("\n\nRecent delivered presentations (newest answer first; read exact reference on demand for edits): {}", json!(recent))); }
+    }
+    if let Some(receipt) = &presentation_follow_up {
+        agent_message.push_str(&presentation_api::follow_up_context(state, receipt).map_err(|error| err_reply(&error))?);
+    }
     let current_book_id = state.book.base.book_id.clone();
     let turn_ref = match precommit_agent_turn(
         state,
@@ -11339,6 +11374,7 @@ fn prepare_agent_chat(
         display_user,
         question_anchor_lid,
         question_quote,
+        presentation_follow_up,
         now,
     ) {
         Ok(turn_ref) => turn_ref,
@@ -11623,7 +11659,7 @@ fn run_precommitted_agent_chat(
             })
         }
     };
-    let mut state_port = agent_run::RuntimeStatePort(port);
+    let mut state_port = agent_run::RuntimeStatePort { port, turn_ref, previewed: Default::default() };
     let mut checkpoint_sink = agent_run::RunCheckpointSink { port, turn_ref };
     runtime::orchestrator::run_context(
         experimental_book.as_ref().unwrap_or(book),
@@ -12167,6 +12203,8 @@ pub fn load_session(path: &Option<PathBuf>) -> Option<SessionState> {
 
 #[cfg(test)]
 mod tests {
+    mod presentation_store_tests;
+    mod presentation_author_tests;
     use super::*;
     use base_schema::{
         sample_base, FormulaComposition, FormulaParameter, FormulaSemantics, LidNode, NodeKind,
@@ -20064,6 +20102,7 @@ unchanged after training concludes";
         let book_id = state.book.base.book_id.clone();
         let turns = (1..=3)
             .map(|ordinal| AgentChatTurn {
+                presentation_follow_up: None,
                 turn_id: format!("turn-{ordinal}"),
                 user_turn_ordinal: ordinal,
                 user: format!("resident turn {ordinal}"),
@@ -20098,6 +20137,7 @@ unchanged after training concludes";
             created_at: "created".into(),
             updated_at: "updated".into(),
             turns: vec![AgentChatTurn {
+                presentation_follow_up: None,
                 turn_id: "other-turn".into(),
                 user_turn_ordinal: 1,
                 user: "other".into(),
@@ -20676,6 +20716,7 @@ unchanged after training concludes";
             "Explain this".into(),
             Some("1.1".into()),
             Some(question_quote),
+            None,
             "2026-07-20T00:00:00Z",
         )
         .unwrap();
@@ -20722,6 +20763,7 @@ unchanged after training concludes";
             state,
             &book_id,
             "Explain the cited evidence".into(),
+            None,
             None,
             None,
             "2026-07-20T00:00:00Z",
@@ -20796,6 +20838,7 @@ unchanged after training concludes";
                 format!("warning fixture {index}"),
                 None,
                 None,
+                None,
                 "2026-07-24T00:00:00Z",
             )
             .unwrap();
@@ -20857,6 +20900,7 @@ unchanged after training concludes";
             &mut state,
             &book_id,
             "Explain this safely".into(),
+            None,
             None,
             None,
             "2026-07-20T00:00:00Z",
@@ -20968,6 +21012,7 @@ unchanged after training concludes";
             &mut state,
             &book_id,
             "Synthetic audit question".into(),
+            None,
             None,
             None,
             "2026-07-20T00:00:00Z",
@@ -21362,6 +21407,7 @@ Version 1.2 and bare 1.1 stay unchanged.
             &mut state,
             &current_book_id,
             "another turn".into(),
+            None,
             None,
             None,
             "2026-07-20T00:01:00Z",
@@ -21970,6 +22016,7 @@ Version 1.2 and bare 1.1 stay unchanged.
         let mut history = AgentHistory::default();
         let mut session = new_agent_session("book", "t0", 0);
         session.turns.push(AgentChatTurn {
+            presentation_follow_up: None,
             turn_id: stable_agent_turn_id(&session.id, 1),
             user_turn_ordinal: 1,
             user: "command 是什么".into(),

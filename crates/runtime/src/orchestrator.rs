@@ -152,6 +152,7 @@ pub struct SourceBinding {
 pub enum AgentAnswerPart {
     Markdown { text: String },
     Sources { source_ref_ids: Vec<String> },
+    Presentation { presentation_id: String, revision: u32 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
@@ -2277,6 +2278,8 @@ impl AnswerProvenanceLedger {
                     .is_none_or(is_lid_start_boundary)
                     || !is_lid_end_boundary(&answer[end..])
                     || is_ordered_list_marker(answer, start, end)
+                    || (locator.value.bytes().all(|byte| byte.is_ascii_digit())
+                        && !has_root_locator_context(answer, start, end))
                     || violations
                         .iter()
                         .any(|violation| start < violation.end && end > violation.start)
@@ -2348,6 +2351,19 @@ fn contains_locator_literal(text: &str, locator: &str) -> bool {
             .is_none_or(is_lid_start_boundary)
             && is_lid_end_boundary(&text[start + locator.len()..])
     })
+}
+
+fn has_root_locator_context(answer: &str, start: usize, end: usize) -> bool {
+    // A bare integer is also an ordinary count or computed value. Root IDs need
+    // locator framing; dotted IDs and explicit LID/node syntax remain unchanged.
+    if is_bracketed_locator(answer, start, end) {
+        return true;
+    }
+    let before = answer[..start].trim_end_matches(|c: char| c.is_whitespace() || ":：=#-为是".contains(c));
+    let after = answer[end..].trim_start();
+    (before.ends_with('第') && after.starts_with(['章', '节', '節', '段']))
+        || ["位置", "章节", "章節", "段落", "编号", "編號"].iter().any(|prefix| before.ends_with(prefix))
+        || ["section", "chapter", "location", "locator"].iter().any(|prefix| before.to_ascii_lowercase().ends_with(prefix))
 }
 
 fn is_ordered_list_marker(answer: &str, start: usize, end: usize) -> bool {
@@ -2528,6 +2544,19 @@ fn normalize_bound_source_suffixes(raw: &str, bindings: &[SourceBinding]) -> Str
 
 pub(crate) fn compile_answer_preview(raw: &str, bindings: &[SourceBinding], provenance: &AnswerProvenanceLedger) -> Option<AgentAnswerView> {
     compile_agent_answer(raw, bindings, provenance).ok().map(|answer| answer.view)
+}
+
+/// Public presentation semantics use the same compiler as ordinary answers.
+/// HTML and scripts are private assets, never Markdown input to this compiler.
+pub fn compile_presentation_text(raw: &str, bindings: &[SourceBinding], messages: &[Message]) -> Result<AgentAnswerView, Vec<AnswerDeliveryIssue>> {
+    let mut provenance = AnswerProvenanceLedger::from_messages(messages);
+    for binding in bindings {
+        provenance.observe_public_text(&binding.preview_snapshot, AnswerProvenanceChannel::SelectionEvidence);
+        for lid in [&binding.evidence_range.start_lid, &binding.evidence_range.end_lid] {
+            provenance.observe_internal_locator(lid, AnswerProvenanceChannel::SelectionLocator);
+        }
+    }
+    compile_agent_answer(raw, bindings, &provenance).map(|answer| answer.view).map_err(|error| error.issues)
 }
 fn answer_projector(adapter: &dyn ModelAdapter, structured: bool, bindings: &[SourceBinding], provenance: &AnswerProvenanceLedger, repair: bool) -> crate::answer_stream::AnswerProjector {
     crate::answer_stream::AnswerProjector::new(adapter.run_events().unwrap_or_default(), structured || adapter.stream_text_is_structured(), bindings, provenance, repair)
@@ -2905,6 +2934,7 @@ fn declared_tool_specs() -> Vec<ToolSpec> {
         },
     };
     vec![
+        crate::presentation_author::spec(),
         book_s(BookToolId::Query),
         book_s(BookToolId::Synthesize),
         book_s(BookToolId::SearchText),
@@ -3906,6 +3936,7 @@ fn dispatch_state_tool(
         | ToolHandlerId::Artifact(_)
         | ToolHandlerId::ToolSearch
         | ToolHandlerId::SourcePresent
+        | ToolHandlerId::PresentationAuthor
         | ToolHandlerId::ProfileMarkUsed => {
             unreachable!(
                 "special and Book handlers are dispatched before the generic handler match"
@@ -4072,6 +4103,10 @@ fn canonical_tool_arguments(arguments: &str) -> String {
 }
 
 fn trace_tool_arguments(tool: &str, arguments: &str) -> String {
+    if tool == "presentation.author" {
+        let v: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
+        return serde_json::json!({"operation":v["operation"],"candidate_id":v["candidate_id"]}).to_string();
+    }
     if tool != "tool.search" {
         return arguments.to_string();
     }
@@ -4762,6 +4797,7 @@ const FINALIZATION_INSTRUCTIONS: &str = "finalization_sampling.v1\n\
 The model-tool loop budget is exhausted. Produce the final answer now from the current conversation and already observed evidence. \
 Tools are disabled for this sampling. Do not request, describe, simulate, or emit tool calls or tool-call syntax. \
 Answer the user's request directly; if the available evidence is insufficient, state the remaining gap honestly.";
+const PRESENTATION_DELIVERY_GRACE_FRAGMENT_KEY: &str = "agent.presentation_delivery_grace";
 const VERIFIED_SELECTION_INITIAL_EXCLUDED_TOOLS: &[&str] = &[
     "book.text",
     "book.search_text",
@@ -5102,6 +5138,10 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
     result
 }
 
+fn append_presentations(view: &mut AgentAnswerView, references: &[crate::presentation::PresentationRef]) {
+    view.parts.extend(references.iter().map(|r| AgentAnswerPart::Presentation { presentation_id:r.presentation_id.clone(), revision:r.revision }));
+}
+
 pub fn run_context(
     book: &Book,
     state: &mut impl ResidentStatePort,
@@ -5212,6 +5252,8 @@ pub fn run_context(
     let mut evidence_acquisition_calls = 0_usize;
     let mut experimental_body_budget = crate::experiment::BodyBudget::default();
     let mut selection_protocol_retries = 0_u8;
+    let mut presentation_delivery_grace: Option<String> = None;
+    let mut presentation_delivery_grace_used = false;
 
     // Pre-turn pressure includes the new user message, but the compactable source
     // history deliberately does not. The user text is appended only after a
@@ -5297,9 +5339,32 @@ pub fn run_context(
 
     loop {
         context.cancellation.check()?;
+        let mut sampling_context_fragments = context_fragments.clone();
+        let delivery_grace_excluded_tools = if let Some(candidate_id) = presentation_delivery_grace.as_ref() {
+            sampling_context_fragments.upsert(ContextFragment::new(
+                PRESENTATION_DELIVERY_GRACE_FRAGMENT_KEY,
+                FragmentScope::Dynamic,
+                Role::System,
+                format!("presentation_delivery_grace.v1\nThe tool-loop budget is exhausted after a successful preview. Call presentation.author exactly once with operation=deliver and candidate_id={candidate_id}. Do not read, write, preview, call another tool, or answer in prose yet."),
+                FragmentSensitivity::Private,
+            )).map_err(context_fragment_error)?;
+            tool_registry.registrations().iter()
+                .map(|registration| registration.spec.name.as_str())
+                .filter(|name| *name != "presentation.author")
+                .collect::<Vec<_>>()
+        } else { Vec::new() };
+        let sampled_excluded_tools: &[&str] = if !delivery_grace_excluded_tools.is_empty() {
+            &delivery_grace_excluded_tools
+        } else if !verified_selection_turn {
+            &[]
+        } else if evidence_acquisition_calls == 0 {
+            VERIFIED_SELECTION_INITIAL_EXCLUDED_TOOLS
+        } else {
+            VERIFIED_SELECTION_FOLLOWUP_EXCLUDED_TOOLS
+        };
         let (mut tool_exposure_plan, mut request_plan) = build_sample_request(
             messages,
-            &context_fragments,
+            &sampling_context_fragments,
             book,
             &context.active_tool_results,
             active_checkpoint.as_ref(),
@@ -5310,13 +5375,7 @@ pub fn run_context(
             &context.tool_exposure_state,
             artifact_tools.exposure(),
             context.evidence_ledger.evidence_state(),
-            if !verified_selection_turn {
-                &[]
-            } else if evidence_acquisition_calls == 0 {
-                VERIFIED_SELECTION_INITIAL_EXCLUDED_TOOLS
-            } else {
-                VERIFIED_SELECTION_FOLLOWUP_EXCLUDED_TOOLS
-            },
+            sampled_excluded_tools,
         )?;
         let force_selection_convergence = verified_selection_turn
             && evidence_acquisition_calls >= VERIFIED_SELECTION_EVIDENCE_CALL_LIMIT;
@@ -5340,14 +5399,14 @@ pub fn run_context(
             messages,
             adapter,
             &runtime_profile,
-            &context_fragments,
+            &sampling_context_fragments,
             &effects,
             &mut active_checkpoint,
             checkpoint_sink,
         )? {
             (tool_exposure_plan, request_plan) = build_sample_request(
                 messages,
-                &context_fragments,
+                &sampling_context_fragments,
                 book,
                 &context.active_tool_results,
                 active_checkpoint.as_ref(),
@@ -5358,13 +5417,7 @@ pub fn run_context(
                 &context.tool_exposure_state,
                 artifact_tools.exposure(),
                 context.evidence_ledger.evidence_state(),
-                if !verified_selection_turn {
-                    &[]
-                } else if evidence_acquisition_calls == 0 {
-                    VERIFIED_SELECTION_INITIAL_EXCLUDED_TOOLS
-                } else {
-                    VERIFIED_SELECTION_FOLLOWUP_EXCLUDED_TOOLS
-                },
+                sampled_excluded_tools,
             )?;
             if force_selection_convergence {
                 let (completion, plan) = selection_answer_synthesis_request(
@@ -5378,6 +5431,19 @@ pub fn run_context(
                 request_plan = plan;
             }
         }
+        if let Some(candidate_id) = presentation_delivery_grace.as_ref() {
+            if let Some(tool) = request_plan.tools.iter_mut().find(|tool| tool.name == "presentation.author") {
+                tool.parameters = serde_json::json!({"type":"object","properties":{
+                    "operation":{"type":"string","enum":["deliver"]},
+                    "candidate_id":{"type":"string","enum":[candidate_id]}
+                },"required":["operation","candidate_id"],"additionalProperties":false});
+            }
+        }
+        request_plan.preview_images = std::mem::take(&mut context.presentation_images);
+        let image_tokens = request_plan.preview_images.len() as u32 * 4096;
+        request_plan.active_context.estimated_input_tokens += image_tokens;
+        request_plan.active_context.remaining_tokens -= i64::from(image_tokens);
+        request_plan.active_context.fits &= request_plan.active_context.remaining_tokens >= 0;
         let final_budget = ActiveContextBudget::from_plan(&request_plan);
         if !final_budget.fits {
             return Err(active_context_exhausted(final_budget));
@@ -5439,6 +5505,18 @@ pub fn run_context(
             }
         };
         context.cancellation.check()?;
+        if !request_plan.preview_images.is_empty() {
+            if let Some(id) = context.pending_preview.take() { context.inspected_presentations.insert(id); }
+        }
+        if let Some(candidate_id) = presentation_delivery_grace.take() {
+            let valid_delivery = turn.tool_calls.len() == 1
+                && turn.tool_calls[0].name == "presentation.author"
+                && serde_json::from_str::<crate::presentation_author::AuthorRequest>(&turn.tool_calls[0].arguments)
+                    .is_ok_and(|request| matches!(request, crate::presentation_author::AuthorRequest::Deliver { candidate_id: id } if id == candidate_id));
+            if !valid_delivery {
+                return Err(ToolError { error_code:"PRESENTATION_DELIVERY_GRACE_REQUIRED".into(), category:"protocol".into(), message:"provider did not deliver the successfully previewed presentation in the reserved delivery sampling".into() });
+            }
+        }
         let provider_requested_tool_calls = !turn.tool_calls.is_empty();
         if verified_selection_turn && provider_requested_tool_calls {
             let mut remaining_evidence_calls = VERIFIED_SELECTION_EVIDENCE_CALL_LIMIT
@@ -5468,7 +5546,7 @@ pub fn run_context(
         }
         let provider_reported_tokens = turn.usage_total_tokens;
         let billed_tokens_charged =
-            provider_reported_tokens.unwrap_or_else(|| messages_estimate(&provider_messages));
+            provider_reported_tokens.unwrap_or_else(|| messages_estimate(&provider_messages) + image_tokens);
         spent += billed_tokens_charged;
         request_audit.finish_request(
             request_audit_index,
@@ -5552,9 +5630,11 @@ pub fn run_context(
             let answer = delivery
                 .as_ref()
                 .map(|delivery| delivery.compiled.answer.clone());
-            let answer_view = delivery
-                .as_ref()
-                .map(|delivery| delivery.compiled.view.clone());
+            let answer_view = delivery.as_ref().map(|delivery| {
+                let mut view = delivery.compiled.view.clone();
+                if !delivery.incomplete { append_presentations(&mut view, &context.delivered_presentations); }
+                view
+            });
             let delivery_diagnostics = delivery
                 .as_ref()
                 .and_then(|delivery| delivery.diagnostics.clone());
@@ -5755,6 +5835,37 @@ pub fn run_context(
                     };
                     (result, None, None)
                 }
+                Some(ToolHandlerId::PresentationAuthor) => {
+                    let result = (|| -> Result<crate::presentation_author::AuthorResult, ToolError> {
+                        let request: crate::presentation_author::AuthorRequest = serde_json::from_str(&tc.arguments)
+                            .map_err(|e| ToolError { error_code: "PRESENTATION_ARGUMENTS_INVALID".into(), category: "validation".into(), message:e.to_string() })?;
+                        if let crate::presentation_author::AuthorRequest::Deliver { candidate_id } = &request {
+                            if !context.inspected_presentations.contains(candidate_id) {
+                                return Err(ToolError { error_code:"PRESENTATION_INSPECTION_REQUIRED".into(), category:"validation".into(), message:"Preview and inspect this candidate's screenshots in a subsequent sampling before delivery".into() });
+                            }
+                        }
+                        state.author_presentation(request, &context.evidence_ledger.bindings(), messages, &context.cancellation)
+                    })();
+                    let body = match result {
+                        Ok(result) => {
+                            if let Some(id) = result.previewed_candidate {
+                                context.inspected_presentations.remove(&id);
+                                context.pending_preview = Some(id);
+                                context.presentation_images = result.images;
+                            }
+                            if let Some(reference) = result.delivered {
+                                if !context.delivered_presentations.contains(&reference) { context.delivered_presentations.push(reference); }
+                            }
+                            // The first failed observation is new information for repair.
+                            // The set counts each candidate/status once, so repeated failures
+                            // still hit the existing no-progress limit.
+                            capability_batch_observations.insert(format!("presentation:{}:{}:{}:{}",result.body["status"],result.body.get("candidate_id").unwrap_or(&result.body["reference"]),result.body["file"],result.body["offset"]));
+                            result.body.to_string()
+                        }
+                        Err(error) => to_json(&error),
+                    };
+                    (body, None, None)
+                }
                 Some(ToolHandlerId::Artifact(id)) => {
                     (artifact_tools.execute(id, &tc.arguments), None, None)
                 }
@@ -5952,7 +6063,7 @@ pub fn run_context(
             let is_artifact_call = registered.is_some_and(|registration| {
                 matches!(registration.handler, ToolHandlerId::Artifact(_))
             });
-            let persisted_tool_content = is_artifact_call.then(|| to_json(&receipt));
+            let persisted_tool_content = (is_artifact_call || tc.name == "presentation.author").then(|| to_json(&receipt));
             context
                 .active_tool_results
                 .insert(tc.id.clone(), projection.into_envelope(receipt));
@@ -6062,6 +6173,13 @@ pub fn run_context(
         let stalled = phase_progress_guard.blocks(&batch_progress_after)
             && !phase_progress_guard.recovery_available();
         let experimental_budget_stop = experimental && spent >= 100_000;
+        if turns >= cfg.max_turns && !presentation_delivery_grace_used {
+            if let Some(candidate_id) = context.pending_preview.clone() {
+                presentation_delivery_grace = Some(candidate_id);
+                presentation_delivery_grace_used = true;
+                continue;
+            }
+        }
         if turns >= cfg.max_turns || stalled || experimental_budget_stop {
             let mut finalization_context_fragments = context_fragments.clone();
             finalization_context_fragments
@@ -6192,7 +6310,8 @@ pub fn run_context(
             );
             spent += delivery.extra_tokens;
             let answer = delivery.compiled.answer.clone();
-            let answer_view = delivery.compiled.view.clone();
+            let mut answer_view = delivery.compiled.view.clone();
+            if !delivery.incomplete { append_presentations(&mut answer_view, &context.delivered_presentations); }
             let source_bindings = delivery.compiled.bindings;
             messages.push(Message {
                 role: Role::Assistant,
@@ -6275,6 +6394,153 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::{HashMap, VecDeque};
     use std::path::PathBuf;
+
+    #[test]
+    fn presentation_author_read_continuations_are_progress() {
+        use crate::presentation_author::{AuthorRequest, AuthorResult};
+        struct Port { store: MemoryStore, reader: Reader }
+        impl ResidentStatePort for Port {
+            fn with_state<R>(&mut self, f: impl FnOnce(&mut MemoryStore, &mut Reader) -> R) -> R { f(&mut self.store, &mut self.reader) }
+            fn author_presentation(&mut self, req: AuthorRequest, _: &[SourceBinding], _: &[Message], _: &crate::run_context::CancellationToken) -> Result<AuthorResult, ToolError> {
+                let AuthorRequest::Read { reference, offset, .. } = req else { unreachable!() };
+                Ok(AuthorResult { body:serde_json::json!({"status":"version_read","reference":reference,"file":"index.html","offset":offset,"text":"code chunk","next_offset":if offset < 8000 { Some(offset + 4000) } else { None }}), images:vec![], previewed_candidate:None, delivered:None })
+            }
+        }
+        let b = book();
+        let mut port = Port { store:MemoryStore::open(tmp("rp7-read-continuations")).unwrap(), reader:Reader::new(&b,1) };
+        let mut turns = vec![turn_calls(vec![call("discover","tool.search",r#"{"task":"edit HTML","required_capabilities":["presentation_authoring"],"scope":"passage","operation":"explain","effect_mode":"read_only","max_results":1}"#)])];
+        for offset in [0, 4000, 8000] {
+            turns.push(turn_calls(vec![call(&format!("read-{offset}"), "presentation.author", &serde_json::json!({"operation":"read","reference":{"presentation_id":"p1","revision":1},"offset":offset}).to_string())]));
+        }
+        turns.push(turn_final("已读取完整代码。"));
+        let adapter = RequestPlanRecordingAdapter::new(turns, vec![]);
+        let snapshot = default_profile_snapshot(&b,&port.store,"t0");
+        let mut context = RunContext::new(new_session(),OuterConfig::default(),adapter.model_runtime_profile());
+        let outcome = run_context(&b,&mut port,&adapter,&mut context,&snapshot,&ResidentTurnResources::default(),None,&mut EphemeralCompactionCheckpointSink::default(),"读取旧版完整代码","t0").unwrap();
+        assert!(!outcome.incomplete, "different code chunks must not trigger no-progress finalization");
+    }
+
+    #[test]
+    fn presentation_author_failed_observation_allows_recheck_then_repair() {
+        use crate::presentation_author::{AuthorRequest, AuthorResult, PreviewImage};
+        struct Port { store: MemoryStore, reader: Reader, writes: usize }
+        impl ResidentStatePort for Port {
+            fn with_state<R>(&mut self, f: impl FnOnce(&mut MemoryStore, &mut Reader) -> R) -> R { f(&mut self.store, &mut self.reader) }
+            fn author_presentation(&mut self, req: AuthorRequest, _: &[SourceBinding], _: &[Message], _: &crate::run_context::CancellationToken) -> Result<AuthorResult, ToolError> {
+                let mut result = AuthorResult { body: serde_json::Value::Null, images: vec![], previewed_candidate: None, delivered: None };
+                match req {
+                    AuthorRequest::Write { .. } => { self.writes += 1; result.body = serde_json::json!({"status":"candidate_saved","candidate_id":format!("c{}",self.writes)}); }
+                    AuthorRequest::Preview { candidate_id, .. } => {
+                        result.body = if candidate_id == "c1" {
+                            serde_json::json!({"status":"preview_failed","candidate_id":candidate_id,"error_code":"PRESENTATION_PREVIEW_FAILED","errors":["script error"]})
+                        } else { serde_json::json!({"status":"preview_ready_for_inspection","candidate_id":candidate_id}) };
+                        result.previewed_candidate = Some(candidate_id);
+                        result.images.push(PreviewImage { caption:"orchestration test observation".into(), png_base64:"png".into() });
+                    }
+                    AuthorRequest::Deliver { .. } => {
+                        let reference = crate::presentation::PresentationRef { presentation_id:"p1".into(), revision:1 };
+                        result.body = serde_json::json!({"status":"version_saved","reference":reference});
+                        result.delivered = Some(reference);
+                    }
+                    AuthorRequest::Read { .. } => unreachable!(),
+                }
+                Ok(result)
+            }
+        }
+        let b = book();
+        let mut port = Port { store:MemoryStore::open(tmp("rp7-observation")).unwrap(), reader:Reader::new(&b,1), writes:0 };
+        let adapter = RequestPlanRecordingAdapter::new(vec![
+            turn_calls(vec![call("discover","tool.search",r#"{"task":"interactive HTML","required_capabilities":["presentation_authoring"],"scope":"passage","operation":"explain","effect_mode":"read_only","max_results":1}"#)]),
+            turn_calls(vec![call("write","presentation.author",r#"{"operation":"write","title":"example","html":"<h1>Example</h1>","readable_content":"Example"}"#)]),
+            turn_calls(vec![call("preview","presentation.author",r#"{"operation":"preview","candidate_id":"c1"}"#)]),
+            turn_calls(vec![call("recheck","presentation.author",r#"{"operation":"preview","candidate_id":"c1"}"#)]),
+            turn_calls(vec![call("repair","presentation.author",r#"{"operation":"write","title":"fixed","html":"<h1>Fixed</h1>","readable_content":"Fixed"}"#)]),
+            turn_calls(vec![call("preview-fixed","presentation.author",r#"{"operation":"preview","candidate_id":"c2"}"#)]),
+            turn_calls(vec![call("deliver","presentation.author",r#"{"operation":"deliver","candidate_id":"c2"}"#)]),
+            turn_final("已修正并交付。"),
+        ], vec![]);
+        let snapshot = default_profile_snapshot(&b,&port.store,"t0");
+        let mut context = RunContext::new(new_session(),OuterConfig::default(),adapter.model_runtime_profile());
+        let outcome = run_context(&b,&mut port,&adapter,&mut context,&snapshot,&ResidentTurnResources::default(),None,&mut EphemeralCompactionCheckpointSink::default(),"制作交互内容","t0").unwrap();
+        assert_eq!(port.writes, 2, "first failed observation must leave room for repair after one recheck");
+        assert!(outcome.answer_view.unwrap().parts.iter().any(|p| matches!(p, AgentAnswerPart::Presentation { .. })));
+    }
+
+    #[test]
+    fn presentation_author_requires_next_sampling_and_attaches_saved_reference() {
+        use crate::presentation_author::{AuthorRequest, AuthorResult, PreviewImage};
+        struct Port { store:MemoryStore, reader:Reader, delivered:usize }
+        impl ResidentStatePort for Port {
+            fn with_state<R>(&mut self, f:impl FnOnce(&mut MemoryStore,&mut Reader)->R)->R { f(&mut self.store,&mut self.reader) }
+            fn author_presentation(&mut self, req:AuthorRequest, _: &[SourceBinding], _: &[Message], _: &crate::run_context::CancellationToken)->Result<AuthorResult,ToolError> {
+                let mut r=AuthorResult {body:serde_json::json!({"status":"candidate_saved","candidate_id":"c1"}),images:vec![],previewed_candidate:None,delivered:None};
+                match req {
+                    AuthorRequest::Write {..} | AuthorRequest::Read {..} => {},
+                    AuthorRequest::Preview {candidate_id,..} => {r.body["status"]=serde_json::json!("preview_ready_for_inspection");r.previewed_candidate=Some(candidate_id);r.images.push(PreviewImage {caption:"real observation placeholder for orchestration test".into(),png_base64:"png".into()});},
+                    AuthorRequest::Deliver {..} => {self.delivered+=1;r.body["status"]=serde_json::json!("version_saved");r.delivered=Some(crate::presentation::PresentationRef {presentation_id:"p1".into(),revision:1});},
+                }
+                Ok(r)
+            }
+        }
+        let b=book();
+        let mut port=Port {store:MemoryStore::open(tmp("rp4-runtime")).unwrap(),reader:Reader::new(&b,1),delivered:0};
+        let adapter=RequestPlanRecordingAdapter::new(vec![
+            turn_calls(vec![call("discover","tool.search",r#"{"task":"interactive HTML","required_capabilities":["presentation_authoring"],"scope":"passage","operation":"explain","effect_mode":"read_only","max_results":1}"#)]),
+            turn_calls(vec![call("write","presentation.author",r#"{"operation":"write","title":"example","html":"<h1>Example</h1>","readable_content":"Example"}"#)]),
+            turn_calls(vec![call("preview","presentation.author",r#"{"operation":"preview","candidate_id":"c1"}"#),call("early","presentation.author",r#"{"operation":"deliver","candidate_id":"c1"}"#)]),
+            turn_calls(vec![call("deliver","presentation.author",r#"{"operation":"deliver","candidate_id":"c1"}"#)]),
+            turn_final("交互内容已准备好。"),
+        ],vec![]);
+        let snapshot=default_profile_snapshot(&b,&port.store,"t0");
+        let mut context=RunContext::new(new_session(),OuterConfig::default(),adapter.model_runtime_profile());
+        let outcome=run_context(&b,&mut port,&adapter,&mut context,&snapshot,&ResidentTurnResources::default(),None,&mut EphemeralCompactionCheckpointSink::default(),"制作交互内容","t0").unwrap();
+        assert_eq!(port.delivered,1);
+        assert!(context.messages.iter().any(|m| m.content.as_deref().is_some_and(|t|t.contains("PRESENTATION_INSPECTION_REQUIRED"))));
+        assert!(outcome.answer_view.unwrap().parts.iter().any(|p| matches!(p,AgentAnswerPart::Presentation {presentation_id,revision} if presentation_id=="p1" && *revision==1)));
+        let plans=adapter.seen_plans.borrow();
+        assert_eq!(plans[3].preview_images.len(),1);
+        assert!(plans[4].preview_images.is_empty());
+    }
+
+    #[test]
+    fn presentation_preview_at_turn_limit_gets_one_deliver_only_sampling() {
+        use crate::presentation_author::{AuthorRequest, AuthorResult, PreviewImage};
+        struct Port { store:MemoryStore, reader:Reader, delivered:usize }
+        impl ResidentStatePort for Port {
+            fn with_state<R>(&mut self, f:impl FnOnce(&mut MemoryStore,&mut Reader)->R)->R { f(&mut self.store,&mut self.reader) }
+            fn author_presentation(&mut self, req:AuthorRequest, _: &[SourceBinding], _: &[Message], _: &crate::run_context::CancellationToken)->Result<AuthorResult,ToolError> {
+                let mut r=AuthorResult {body:serde_json::json!({"status":"candidate_saved","candidate_id":"c1"}),images:vec![],previewed_candidate:None,delivered:None};
+                match req {
+                    AuthorRequest::Write {..} => {},
+                    AuthorRequest::Preview {candidate_id,..} => {r.body["status"]=serde_json::json!("preview_ready_for_inspection");r.previewed_candidate=Some(candidate_id);r.images.push(PreviewImage {caption:"turn-limit preview".into(),png_base64:"png".into()});},
+                    AuthorRequest::Deliver {..} => {self.delivered+=1;r.body["status"]=serde_json::json!("version_saved");r.delivered=Some(crate::presentation::PresentationRef {presentation_id:"p-limit".into(),revision:1});},
+                    AuthorRequest::Read {..} => unreachable!(),
+                }
+                Ok(r)
+            }
+        }
+        let b=book();
+        let mut port=Port {store:MemoryStore::open(tmp("rp7-delivery-grace")).unwrap(),reader:Reader::new(&b,1),delivered:0};
+        let adapter=RequestPlanRecordingAdapter::new(vec![
+            turn_calls(vec![call("discover","tool.search",r#"{"task":"interactive HTML","required_capabilities":["presentation_authoring"],"scope":"passage","operation":"explain","effect_mode":"read_only","max_results":1}"#)]),
+            turn_calls(vec![call("write","presentation.author",r#"{"operation":"write","title":"example","html":"<h1>Example</h1>","readable_content":"Example"}"#)]),
+            turn_calls(vec![call("preview","presentation.author",r#"{"operation":"preview","candidate_id":"c1"}"#)]),
+            turn_calls(vec![call("deliver","presentation.author",r#"{"operation":"deliver","candidate_id":"c1"}"#)]),
+            turn_final("已交付。"),
+        ],vec![]);
+        let snapshot=default_profile_snapshot(&b,&port.store,"t0");
+        let mut context=RunContext::new(new_session(),OuterConfig {max_turns:3,..Default::default()},adapter.model_runtime_profile());
+        let outcome=run_context(&b,&mut port,&adapter,&mut context,&snapshot,&ResidentTurnResources::default(),None,&mut EphemeralCompactionCheckpointSink::default(),"制作交互内容","t0").unwrap();
+        assert_eq!(port.delivered,1);
+        assert!(outcome.incomplete);
+        assert_eq!(outcome.warning.as_deref(),Some(TURN_LIMIT_EXCEEDED));
+        assert!(outcome.answer_view.unwrap().parts.iter().any(|part| matches!(part,AgentAnswerPart::Presentation {presentation_id,revision} if presentation_id=="p-limit" && *revision==1)));
+        let plans=adapter.seen_plans.borrow();
+        assert_eq!(plans[3].tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),vec!["presentation.author"]);
+        assert_eq!(plans[3].tools[0].parameters["properties"]["operation"]["enum"],serde_json::json!(["deliver"]));
+        assert_eq!(plans[3].tools[0].parameters["properties"]["candidate_id"]["enum"],serde_json::json!(["c1"]));
+        assert_eq!(plans[3].preview_images.len(),1);
+    }
 
     fn resident_artifact_snapshot(private_body: &str) -> ArtifactAccessSnapshot {
         ArtifactAccessSnapshot::new(
@@ -10379,6 +10645,18 @@ user_question=\"explain normalization\"";
             label_snapshot: format!("正文 · {source_ref_id}"),
             preview_snapshot: format!("preview {source_ref_id}"),
         }
+    }
+
+    #[test]
+    fn presentation_provenance_root_lid_does_not_ban_counts_or_fractions() {
+        let bindings = vec![source_binding_fixture("ref1", "1")];
+        for text in ["已展开 1 张卡片的补充说明", "找到 1 处证据，召回率 1/3", "补齐后召回率为 1。"] {
+            assert!(compile_presentation_text(text, &bindings, &[]).is_ok(), "{text}");
+        }
+        for text in ["参见 LID 1。", "内部位置 [1]。", "请看第1节。", "位置为 1. 请跳转。"] {
+            assert!(compile_presentation_text(text, &bindings, &[]).is_err(), "{text}");
+        }
+        assert!(compile_presentation_text("请看 1.4.2。", &[source_binding_fixture("ref2", "1.4.2")], &[]).is_err());
     }
 
     #[test]

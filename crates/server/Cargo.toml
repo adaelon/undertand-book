@@ -16,6 +16,8 @@ runtime = { path = "../runtime" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 tiny_http = "0.12"
+tungstenite = "0.28"
+tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
