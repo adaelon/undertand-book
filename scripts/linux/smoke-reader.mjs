@@ -105,6 +105,13 @@ try {
   assert.equal(host.desktop_host, false);
   assert.equal(host.reader_only, true);
   checked('Linux pure-reader host');
+  evidence.observability = await api('/observability/status');
+  const observabilityJson = JSON.stringify(evidence.observability);
+  assert(!observabilityJson.includes('api_key'));
+  assert(!observabilityJson.includes('endpoint'));
+  assert(['off', 'metadata'].includes(evidence.observability.mode));
+  assert(['complete', 'partial', 'unknown'].includes(evidence.observability.coverage));
+  checked('observability state is safe and host-owned');
   if (mode === 'technical' || mode === 'qa' || mode === 'guided') {
     await openBook(technical);
     await page.locator('.reader-pane').waitFor({ state: 'visible' });

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../packages/web/src/generated/")]
 pub struct AnswerPatch {
     pub message_id: u32,
     pub revision: u32,
@@ -292,6 +293,6 @@ mod tests {
     }
     #[test]
     fn export_answer_patch() {
-        AnswerPatch::export_all_to("../../packages/web/src/generated").unwrap();
+        AnswerPatch::export_all().unwrap();
     }
 }

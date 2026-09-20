@@ -63,11 +63,16 @@ body {
 }
 
 .app {
-  height: 100vh;
-  height: 100dvh;
+  height: var(--app-viewport-height, 100vh);
   display: flex;
   flex-direction: column;
   background: var(--canvas-parchment);
+}
+
+@supports (height: 100dvh) {
+  .app {
+    height: 100dvh;
+  }
 }
 
 .topbar {
@@ -1187,9 +1192,13 @@ input:focus {
 
 @media (max-width: 1023px) {
   .app {
-    height: 100vh;
-    height: 100dvh;
+    height: var(--app-viewport-height, 100vh);
     min-height: 0;
+  }
+  @supports (height: 100dvh) {
+    .app {
+      height: 100dvh;
+    }
   }
   .topbar {
     position: relative;

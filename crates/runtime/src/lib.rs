@@ -11,29 +11,30 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use ts_rs::TS;
 
-pub mod provider_stream;
-pub mod answer_stream;
 pub mod agent_prompt;
-pub mod experiment;
 pub mod agent_request_audit;
+pub mod answer_stream;
 pub mod auto_compaction;
 pub mod build_intent;
 pub mod compaction;
 pub mod context_fragment;
+pub mod experiment;
 pub mod goldset;
 pub mod guided_read_replay;
 pub mod memory_intent;
 pub mod memory_policy;
 pub mod memory_review;
 pub mod model_runtime;
+pub mod observation;
 pub mod orchestrator;
-pub mod run_context;
-pub mod presentation_preview;
 pub mod presentation;
 pub mod presentation_author;
-pub mod run_events;
+pub mod presentation_preview;
 pub mod profile_api;
 pub mod profile_context;
+pub mod provider_stream;
+pub mod run_context;
+pub mod run_events;
 pub mod semantic_release;
 pub mod tool_exposure;
 pub mod tool_registry;
@@ -289,14 +290,36 @@ pub struct AssistantTurn {
 /// loop 与后端之间的薄层 `[ADR-0016/0026]`;loop 控制 provider 无关,只经此触模型。
 /// `complete` = 内层 query 合一轮(JSON 契约);`chat` = 外层多轮 tool-calling。
 pub trait ModelAdapter {
-    fn stream_text_is_structured(&self) -> bool { false }
-    fn complete_observed(&self, request: CompletionRequest, _observer: &mut dyn provider_stream::ModelObserver) -> Result<ParsedResponse, AdapterError> { self.complete(request) }
+    fn stream_text_is_structured(&self) -> bool {
+        false
+    }
+    fn complete_observed(
+        &self,
+        request: CompletionRequest,
+        _observer: &mut dyn provider_stream::ModelObserver,
+    ) -> Result<ParsedResponse, AdapterError> {
+        self.complete(request)
+    }
 
-    fn complete_structured_observed(&self, request: CompletionRequest, _observer: &mut dyn provider_stream::ModelObserver) -> Result<serde_json::Value, AdapterError> { self.complete_structured(request) }
+    fn complete_structured_observed(
+        &self,
+        request: CompletionRequest,
+        _observer: &mut dyn provider_stream::ModelObserver,
+    ) -> Result<serde_json::Value, AdapterError> {
+        self.complete_structured(request)
+    }
 
-    fn chat_observed(&self, request: &AgentRequestPlan, _observer: &mut dyn provider_stream::ModelObserver) -> Result<AssistantTurn, AdapterError> { self.chat(request) }
+    fn chat_observed(
+        &self,
+        request: &AgentRequestPlan,
+        _observer: &mut dyn provider_stream::ModelObserver,
+    ) -> Result<AssistantTurn, AdapterError> {
+        self.chat(request)
+    }
 
-    fn run_events(&self) -> Option<crate::run_events::RunEvents> { None }
+    fn run_events(&self) -> Option<crate::run_events::RunEvents> {
+        None
+    }
     /// Native transports also observe cancellation before retrying an interrupted HTTP request.
     fn set_run_cancellation(&self, _cancellation: crate::run_context::CancellationToken) {}
     fn complete(&self, req: CompletionRequest) -> Result<ParsedResponse, AdapterError>;
@@ -2601,7 +2624,9 @@ impl NativeAdapter {
         let mut retried = false;
         let resp = loop {
             if let Some(cancellation) = self.cancellation.borrow().as_ref() {
-                cancellation.check().map_err(|error| AdapterError { message: error.message })?;
+                cancellation.check().map_err(|error| AdapterError {
+                    message: error.message,
+                })?;
             }
             match self.send_chat_completions_once(&url, &body) {
                 Ok(resp) => break resp,
@@ -2621,7 +2646,11 @@ impl NativeAdapter {
                 }
             }
         };
-        provider_stream::read_response(resp, &self.cancellation.borrow().clone().unwrap_or_default(), observer)
+        provider_stream::read_response(
+            resp,
+            &self.cancellation.borrow().clone().unwrap_or_default(),
+            observer,
+        )
     }
 
     fn send_chat_completions_once(
@@ -3132,8 +3161,14 @@ impl ModelAdapter for NativeAdapter {
         self.runtime_profile.clone()
     }
 
-    fn complete(&self, req: CompletionRequest) -> Result<ParsedResponse, AdapterError> { self.complete_observed(req, &mut provider_stream::ignore) }
-    fn complete_observed(&self, req: CompletionRequest, observer: &mut dyn provider_stream::ModelObserver) -> Result<ParsedResponse, AdapterError> {
+    fn complete(&self, req: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
+        self.complete_observed(req, &mut provider_stream::ignore)
+    }
+    fn complete_observed(
+        &self,
+        req: CompletionRequest,
+        observer: &mut dyn provider_stream::ModelObserver,
+    ) -> Result<ParsedResponse, AdapterError> {
         let system = format!("{}\n\n{}", req.system, OUTPUT_CONTRACT);
         let body = serde_json::json!({
             "model": self.model,
@@ -3148,8 +3183,17 @@ impl ModelAdapter for NativeAdapter {
         parsed_response_from_content(response_message_content(&v)?)
     }
 
-    fn complete_structured(&self, req: CompletionRequest) -> Result<serde_json::Value, AdapterError> { self.complete_structured_observed(req, &mut provider_stream::ignore) }
-    fn complete_structured_observed(&self, req: CompletionRequest, observer: &mut dyn provider_stream::ModelObserver) -> Result<serde_json::Value, AdapterError> {
+    fn complete_structured(
+        &self,
+        req: CompletionRequest,
+    ) -> Result<serde_json::Value, AdapterError> {
+        self.complete_structured_observed(req, &mut provider_stream::ignore)
+    }
+    fn complete_structured_observed(
+        &self,
+        req: CompletionRequest,
+        observer: &mut dyn provider_stream::ModelObserver,
+    ) -> Result<serde_json::Value, AdapterError> {
         let body = serde_json::json!({
             "model": self.model,
             "messages": [
@@ -3164,8 +3208,14 @@ impl ModelAdapter for NativeAdapter {
     }
 
     /// 外层多轮 tool-calling:带 `tools` schema 请求,解析 `assistant.tool_calls` + `usage` `[ADR-0026]`。
-    fn chat(&self, request: &AgentRequestPlan) -> Result<AssistantTurn, AdapterError> { self.chat_observed(request, &mut provider_stream::ignore) }
-    fn chat_observed(&self, request: &AgentRequestPlan, observer: &mut dyn provider_stream::ModelObserver) -> Result<AssistantTurn, AdapterError> {
+    fn chat(&self, request: &AgentRequestPlan) -> Result<AssistantTurn, AdapterError> {
+        self.chat_observed(request, &mut provider_stream::ignore)
+    }
+    fn chat_observed(
+        &self,
+        request: &AgentRequestPlan,
+        observer: &mut dyn provider_stream::ModelObserver,
+    ) -> Result<AssistantTurn, AdapterError> {
         let (body, provider_to_internal) = native_chat_request_projection(&self.model, request);
         let v = self.post_chat_completions(body, observer)?;
         let msg = &v["choices"][0]["message"];
@@ -3201,7 +3251,9 @@ impl ModelAdapter for NativeAdapter {
 }
 
 fn append_preview_images(messages: &mut Vec<serde_json::Value>, request: &AgentRequestPlan) {
-    if request.preview_images.is_empty() { return; }
+    if request.preview_images.is_empty() {
+        return;
+    }
     let mut content = Vec::new();
     for image in &request.preview_images {
         content.push(serde_json::json!({"type":"text", "text":image.caption}));
@@ -3249,12 +3301,16 @@ fn native_chat_request_projection(
         "parallel_tool_calls": request.parallel_tool_calls,
         "temperature": 0,
     });
-    if let Some(limit) = request.output_token_limit { body["max_tokens"] = serde_json::json!(limit); }
+    if let Some(limit) = request.output_token_limit {
+        body["max_tokens"] = serde_json::json!(limit);
+    }
     (body, provider_to_internal)
 }
 
 impl ModelAdapter for ReActAdapter {
-    fn stream_text_is_structured(&self) -> bool { true }
+    fn stream_text_is_structured(&self) -> bool {
+        true
+    }
     fn set_run_cancellation(&self, cancellation: crate::run_context::CancellationToken) {
         self.native.set_run_cancellation(cancellation);
     }
@@ -3262,8 +3318,14 @@ impl ModelAdapter for ReActAdapter {
         self.native.runtime_profile.clone()
     }
 
-    fn complete(&self, req: CompletionRequest) -> Result<ParsedResponse, AdapterError> { self.complete_observed(req, &mut provider_stream::ignore) }
-    fn complete_observed(&self, req: CompletionRequest, observer: &mut dyn provider_stream::ModelObserver) -> Result<ParsedResponse, AdapterError> {
+    fn complete(&self, req: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
+        self.complete_observed(req, &mut provider_stream::ignore)
+    }
+    fn complete_observed(
+        &self,
+        req: CompletionRequest,
+        observer: &mut dyn provider_stream::ModelObserver,
+    ) -> Result<ParsedResponse, AdapterError> {
         let system = format!("{}\n\n{}", req.system, OUTPUT_CONTRACT);
         let body = serde_json::json!({
             "model": self.native.model,
@@ -3277,16 +3339,35 @@ impl ModelAdapter for ReActAdapter {
         parsed_response_from_content(response_message_content(&v)?)
     }
 
-    fn complete_structured(&self, req: CompletionRequest) -> Result<serde_json::Value, AdapterError> { self.complete_structured_observed(req, &mut provider_stream::ignore) }
-    fn complete_structured_observed(&self, req: CompletionRequest, observer: &mut dyn provider_stream::ModelObserver) -> Result<serde_json::Value, AdapterError> {
+    fn complete_structured(
+        &self,
+        req: CompletionRequest,
+    ) -> Result<serde_json::Value, AdapterError> {
+        self.complete_structured_observed(req, &mut provider_stream::ignore)
+    }
+    fn complete_structured_observed(
+        &self,
+        req: CompletionRequest,
+        observer: &mut dyn provider_stream::ModelObserver,
+    ) -> Result<serde_json::Value, AdapterError> {
         self.native.complete_structured_observed(req, observer)
     }
 
-    fn chat(&self, request: &AgentRequestPlan) -> Result<AssistantTurn, AdapterError> { self.chat_observed(request, &mut provider_stream::ignore) }
-    fn chat_observed(&self, request: &AgentRequestPlan, observer: &mut dyn provider_stream::ModelObserver) -> Result<AssistantTurn, AdapterError> {
+    fn chat(&self, request: &AgentRequestPlan) -> Result<AssistantTurn, AdapterError> {
+        self.chat_observed(request, &mut provider_stream::ignore)
+    }
+    fn chat_observed(
+        &self,
+        request: &AgentRequestPlan,
+        observer: &mut dyn provider_stream::ModelObserver,
+    ) -> Result<AssistantTurn, AdapterError> {
         let body = react_chat_request_projection(&self.native.model, request);
         let v = self.native.post_chat_completions(body, observer)?;
-        { let mut turn = parse_react_assistant_turn(response_message_content(&v)?)?; turn.usage_total_tokens = v["usage"]["total_tokens"].as_u64().map(|v| v as u32); Ok(turn) }
+        {
+            let mut turn = parse_react_assistant_turn(response_message_content(&v)?)?;
+            turn.usage_total_tokens = v["usage"]["total_tokens"].as_u64().map(|v| v as u32);
+            Ok(turn)
+        }
     }
 }
 
@@ -3308,7 +3389,9 @@ fn react_chat_request_projection(model: &str, request: &AgentRequestPlan) -> ser
         "messages": msgs,
         "temperature": 0,
     });
-    if let Some(limit) = request.output_token_limit { body["max_tokens"] = serde_json::json!(limit); }
+    if let Some(limit) = request.output_token_limit {
+        body["max_tokens"] = serde_json::json!(limit);
+    }
     body
 }
 
@@ -4879,13 +4962,25 @@ mod tests {
 
     #[test]
     fn experiment_output_limit_is_explicit_for_both_adapters_and_absent_by_default() {
-        let profile = ModelRuntimeCatalog::default().resolve("test", ProviderToolProtocol::Native, None);
+        let profile =
+            ModelRuntimeCatalog::default().resolve("test", ProviderToolProtocol::Native, None);
         let mut plan = AgentRequestPlan::for_ad_hoc(profile, &[Message::user("answer")], &[]);
-        assert!(native_chat_request_projection("test", &plan).0.get("max_tokens").is_none());
-        assert!(react_chat_request_projection("test", &plan).get("max_tokens").is_none());
+        assert!(native_chat_request_projection("test", &plan)
+            .0
+            .get("max_tokens")
+            .is_none());
+        assert!(react_chat_request_projection("test", &plan)
+            .get("max_tokens")
+            .is_none());
         plan.output_token_limit = Some(8_000);
-        assert_eq!(native_chat_request_projection("test", &plan).0["max_tokens"], 8_000);
-        assert_eq!(react_chat_request_projection("test", &plan)["max_tokens"], 8_000);
+        assert_eq!(
+            native_chat_request_projection("test", &plan).0["max_tokens"],
+            8_000
+        );
+        assert_eq!(
+            react_chat_request_projection("test", &plan)["max_tokens"],
+            8_000
+        );
     }
 
     #[test]
@@ -5055,7 +5150,11 @@ mod tests {
     fn finalization_adapters_serialize_no_tools_and_no_tool_choice() {
         for protocol in [ProviderToolProtocol::Native, ProviderToolProtocol::ReAct] {
             let profile = ModelRuntimeProfile::fallback("test", protocol);
-            let plan = AgentRequestPlan::for_ad_hoc(profile, &[Message::user("finish using existing evidence")], &[]);
+            let plan = AgentRequestPlan::for_ad_hoc(
+                profile,
+                &[Message::user("finish using existing evidence")],
+                &[],
+            );
             assert_eq!(plan.tool_choice, ToolChoice::None);
             assert!(plan.tools.is_empty());
             let (native, _) = native_chat_request_projection("test", &plan);

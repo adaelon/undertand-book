@@ -46,10 +46,9 @@ use runtime::memory_policy::{
     MemoryPolicyRegistry, PaperPolicyContext, PolicyProjectionInput, PAPER_MEMORY_POLICY_ID,
 };
 use runtime::orchestrator::{
-    new_session, AgentAnswerPart, AgentAnswerSource,
-    AgentAnswerView, AgentEffect, AnswerDeliveryDiagnostics, OuterConfig, OuterOutcome,
-    ProfileMemoryUpdate, ProfileMemoryUpdateKind, ProfileUsageTrace, ResidentTurnResources,
-    SourceBinding,
+    new_session, AgentAnswerPart, AgentAnswerSource, AgentAnswerView, AgentEffect,
+    AnswerDeliveryDiagnostics, OuterConfig, OuterOutcome, ProfileMemoryUpdate,
+    ProfileMemoryUpdateKind, ProfileUsageTrace, ResidentTurnResources, SourceBinding,
 };
 use runtime::profile_api::{
     historical_backfill_job_view, profile_governance_outcome_view, HistoricalBackfillJobRequest,
@@ -72,15 +71,16 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-pub mod host;
 pub mod agent_run;
 pub mod agent_stream;
-pub mod presentation_preview;
-pub mod presentation_store;
-mod presentation_api;
-mod presentation_author;
+pub mod host;
 mod host_lifecycle;
 pub mod mcp;
+pub mod observability;
+mod presentation_api;
+mod presentation_author;
+pub mod presentation_preview;
+pub mod presentation_store;
 
 /// 服务的单会话共享状态(切片0 单用户单书)`[ADR-0028 决策2]`。
 /// S10b:持只读 `Book` + 会话态 `Reader` + 用户私有 `MemoryStore`(物理隔离 `[ADR-0006]`)。
@@ -632,12 +632,20 @@ fn paper_minimap_localization_request(base: &PaperMinimapBase) -> CompletionRequ
 
 fn route_paper_minimap_localize(state: &mut AppState) -> Reply {
     let base = state.book.paper_minimap();
-    localize_paper_minimap(base, paper_minimap_localization_cache_path(&state.session_path), state.adapter.as_ref())
+    localize_paper_minimap(
+        base,
+        paper_minimap_localization_cache_path(&state.session_path),
+        state.adapter.as_ref(),
+    )
 }
 
 static PAPER_LOCALIZATION_CACHE_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn localize_paper_minimap(base: PaperMinimapBase, cache_path: Option<PathBuf>, adapter: &dyn ModelAdapter) -> Reply {
+fn localize_paper_minimap(
+    base: PaperMinimapBase,
+    cache_path: Option<PathBuf>,
+    adapter: &dyn ModelAdapter,
+) -> Reply {
     if base.regions.is_empty() {
         return ok_json(&fallback_paper_minimap_localization(
             &base,
@@ -646,17 +654,20 @@ fn localize_paper_minimap(base: PaperMinimapBase, cache_path: Option<PathBuf>, a
     }
 
     let (cache, mut cache_warning) = {
-    let _guard = PAPER_LOCALIZATION_CACHE_WRITE.lock().unwrap_or_else(|p| p.into_inner());
-    match cache_path.as_deref() {
-        Some(path) => match load_paper_minimap_localization_cache(path) {
-            Ok(cache) => (cache, None),
-            Err(error) => (
-                PaperMinimapLocalizationCache::default(),
-                Some(error.message),
-            ),
-        },
-        None => (PaperMinimapLocalizationCache::default(), None),
-    }};
+        let _guard = PAPER_LOCALIZATION_CACHE_WRITE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        match cache_path.as_deref() {
+            Some(path) => match load_paper_minimap_localization_cache(path) {
+                Ok(cache) => (cache, None),
+                Err(error) => (
+                    PaperMinimapLocalizationCache::default(),
+                    Some(error.message),
+                ),
+            },
+            None => (PaperMinimapLocalizationCache::default(), None),
+        }
+    };
     if let Some(entry) = cache.entries.iter().find(|entry| {
         entry.book_id == base.book_id
             && entry.book_version == base.book_version
@@ -675,8 +686,7 @@ fn localize_paper_minimap(base: PaperMinimapBase, cache_path: Option<PathBuf>, a
         });
     }
 
-    let output = match adapter.complete_structured(paper_minimap_localization_request(&base))
-    {
+    let output = match adapter.complete_structured(paper_minimap_localization_request(&base)) {
         Ok(output) => output,
         Err(error) => {
             let warning = match cache_warning {
@@ -710,10 +720,18 @@ fn localize_paper_minimap(base: PaperMinimapBase, cache_path: Option<PathBuf>, a
     };
     // Another book's translation may finish while this Provider request is running.
     // Reload and merge under a short cache-only lock; never hold Reader state here.
-    let _guard = PAPER_LOCALIZATION_CACHE_WRITE.lock().unwrap_or_else(|p| p.into_inner());
-    let mut cache = match cache_path.as_deref().map(load_paper_minimap_localization_cache) {
+    let _guard = PAPER_LOCALIZATION_CACHE_WRITE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let mut cache = match cache_path
+        .as_deref()
+        .map(load_paper_minimap_localization_cache)
+    {
         Some(Ok(latest)) => latest,
-        Some(Err(error)) => { cache_warning = Some(error.message); cache },
+        Some(Err(error)) => {
+            cache_warning = Some(error.message);
+            cache
+        }
         None => cache,
     };
     cache.entries.retain(|cached| {
@@ -1130,7 +1148,11 @@ fn validate_agent_turn(turn: &AgentChatTurn) -> Result<(), ToolError> {
         (turn.status, turn.outcome.is_some(), turn.error.is_some()),
         (AgentAssistantStatus::PendingAssistant, false, false)
             | (AgentAssistantStatus::Completed, true, false)
-            | (AgentAssistantStatus::Failed | AgentAssistantStatus::Cancelled, false, true)
+            | (
+                AgentAssistantStatus::Failed | AgentAssistantStatus::Cancelled,
+                false,
+                true
+            )
     );
     if !valid {
         return Err(agent_history_internal(format!(
@@ -1542,13 +1564,13 @@ fn finalize_agent_turn(
     }
     turn.status = status;
     turn.run_summary = run_summary;
+    let delivery_failed = outcome
+        .as_ref()
+        .is_some_and(crate::observability::lifecycle::delivery_failed);
     turn.delivery_diagnostics = outcome
         .as_mut()
         .and_then(|outcome| outcome.delivery_diagnostics.take());
-    if let Some(outcome) = outcome
-        .as_mut()
-        .filter(|outcome| outcome.incomplete && turn.delivery_diagnostics.is_some())
-    {
+    if let Some(outcome) = outcome.as_mut().filter(|_| delivery_failed) {
         outcome.answer = Some("这次回答生成失败，请重试。".into());
         outcome.answer_view = Some(AgentAnswerView {
             parts: vec![AgentAnswerPart::Markdown {
@@ -1564,7 +1586,13 @@ fn finalize_agent_turn(
         .map(|outcome| std::mem::take(&mut outcome.source_bindings))
         .unwrap_or_default();
     if let Some(outcome) = &outcome {
-        presentation_store::validate_answer_references(state, &turn_ref.session_id, outcome, messages, &turn.source_bindings)?;
+        presentation_store::validate_answer_references(
+            state,
+            &turn_ref.session_id,
+            outcome,
+            messages,
+            &turn.source_bindings,
+        )?;
     }
     turn.outcome = outcome;
     turn.error = error;
@@ -2099,9 +2127,17 @@ fn turn_view(book: &Book, turn: &AgentChatTurn) -> AgentChatTurnView {
         .as_ref()
         .map(|quote| quote.label.clone())
         .or_else(|| question_source_label(book, turn));
-    let effect_labels = turn.run_summary.as_ref().map(|summary| &summary.effects)
+    let effect_labels = turn
+        .run_summary
+        .as_ref()
+        .map(|summary| &summary.effects)
         .or_else(|| turn.outcome.as_ref().map(|outcome| &outcome.effects))
-        .map(|effects| effects.iter().map(|effect| agent_effect_label(book, effect)).collect())
+        .map(|effects| {
+            effects
+                .iter()
+                .map(|effect| agent_effect_label(book, effect))
+                .collect()
+        })
         .unwrap_or_default();
     let mut outcome = turn.outcome.clone();
     if let Some(public_outcome) = outcome.as_mut() {
@@ -2375,8 +2411,10 @@ pub(crate) fn reader_only_disallows(path: &str, method: &str) -> bool {
         return true;
     }
     if let Some(action) = path.strip_prefix("/build_intent/") {
-        return !matches!((action, method),
-            ("status" | "artifacts" | "usage", "GET") | ("usage.event", "POST"));
+        return !matches!(
+            (action, method),
+            ("status" | "artifacts" | "usage", "GET") | ("usage.event", "POST")
+        );
     }
     false
 }
@@ -2390,7 +2428,8 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
                 "error_code": "READER_ONLY_UNSUPPORTED",
                 "category": "validation",
                 "message": "纯阅读模式不支持预构建；请同步已就绪的完整书籍目录。",
-            }).to_string(),
+            })
+            .to_string(),
         };
     }
     if let Some(action) = path.strip_prefix("/build_intent/") {
@@ -2538,11 +2577,15 @@ pub fn route(state: &mut AppState, req: Req) -> Reply {
         return route_agent_source_resolve(state, req.body);
     }
     if path == "/agent/presentation.state.save" {
-        if req.method != "POST" { return agent_method_not_allowed(); }
+        if req.method != "POST" {
+            return agent_method_not_allowed();
+        }
         return presentation_api::save_state(state, req.body);
     }
     if path == "/agent/presentation.read" || path == "/agent/presentation.observe" {
-        if req.method != "POST" { return agent_method_not_allowed(); }
+        if req.method != "POST" {
+            return agent_method_not_allowed();
+        }
         return presentation_api::route(state, req.body, path.ends_with(".observe"));
     }
     if path == "/agent/source.open" {
@@ -6077,9 +6120,13 @@ fn build_workbench_snapshot(book: &Book, book_dir: &Path, maintain_jobs: bool) -
         reasons.push("trusted source foundation is not ready".into());
     }
 
-    let jobs = match read_build_jobs(book_dir)
-        .and_then(|jobs| if maintain_jobs { enforce_build_job_retention(book_dir, jobs) } else { Ok(jobs) })
-    {
+    let jobs = match read_build_jobs(book_dir).and_then(|jobs| {
+        if maintain_jobs {
+            enforce_build_job_retention(book_dir, jobs)
+        } else {
+            Ok(jobs)
+        }
+    }) {
         Ok(jobs) => jobs,
         Err(e) => return err_reply(&e),
     };
@@ -11170,7 +11217,13 @@ fn agent_source_binding(
     request: &AgentSourceRequest,
 ) -> Result<SourceBinding, ToolError> {
     if let Some(stream) = state.active_agent_stream.as_ref().and_then(|s| s.upgrade()) {
-        if let Some(binding) = stream.source_binding(&state.book.base.book_id, &request.turn_id, &request.source_ref_id) { return Ok(binding); }
+        if let Some(binding) = stream.source_binding(
+            &state.book.base.book_id,
+            &request.turn_id,
+            &request.source_ref_id,
+        ) {
+            return Ok(binding);
+        }
     }
     let turn = state
         .agent_history
@@ -11197,11 +11250,15 @@ fn agent_source_binding(
                 })
             })
     });
-    binding.or_else(|| presentation_api::source_binding(state, &request.turn_id, &request.source_ref_id)).ok_or_else(|| ToolError {
-        error_code: "SOURCE_REF_NOT_FOUND".into(),
-        category: "not_found".into(),
-        message: "source reference does not belong to this turn".into(),
-    })
+    binding
+        .or_else(|| {
+            presentation_api::source_binding(state, &request.turn_id, &request.source_ref_id)
+        })
+        .ok_or_else(|| ToolError {
+            error_code: "SOURCE_REF_NOT_FOUND".into(),
+            category: "not_found".into(),
+            message: "source reference does not belong to this turn".into(),
+        })
 }
 
 fn route_agent_source_resolve(state: &AppState, body: &str) -> Reply {
@@ -11350,22 +11407,36 @@ fn prepare_agent_chat(
             )));
         }
     }
-    let presentation_follow_up = v.get("presentation_follow_up").filter(|value| !value.is_null())
-        .map(|value| serde_json::from_value::<runtime::presentation::PresentationFollowUp>(value.clone()))
-        .transpose().map_err(|_| validation("PRESENTATION_INVALID", "Invalid presentation receipt"))?;
+    let presentation_follow_up = v
+        .get("presentation_follow_up")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            serde_json::from_value::<runtime::presentation::PresentationFollowUp>(value.clone())
+        })
+        .transpose()
+        .map_err(|_| validation("PRESENTATION_INVALID", "Invalid presentation receipt"))?;
     let mut agent_message = agent_question_with_provenance(msg, question_quote.as_ref());
-    if let Some(session) = state.agent_history.active_by_book.get(&state.book.base.book_id)
-        .and_then(|id| state.agent_history.sessions.iter().find(|s| &s.id == id)) {
+    if let Some(session) = state
+        .agent_history
+        .active_by_book
+        .get(&state.book.base.book_id)
+        .and_then(|id| state.agent_history.sessions.iter().find(|s| &s.id == id))
+    {
         let recent: Vec<_> = session.turns.iter().rev().filter_map(|turn| turn.outcome.as_ref()
             .and_then(|o| o.answer_view.as_ref()).map(|view| (turn, view)))
             .flat_map(|(turn, view)| view.parts.iter().filter_map(move |part| match part {
                 AgentAnswerPart::Presentation { presentation_id, revision } => Some(json!({"turn_id":turn.turn_id,"reference":{"presentation_id":presentation_id,"revision":revision}})),
                 _ => None,
             })).take(8).collect();
-        if !recent.is_empty() { agent_message.push_str(&format!("\n\nRecent delivered presentations (newest answer first; read exact reference on demand for edits): {}", json!(recent))); }
+        if !recent.is_empty() {
+            agent_message.push_str(&format!("\n\nRecent delivered presentations (newest answer first; read exact reference on demand for edits): {}", json!(recent)));
+        }
     }
     if let Some(receipt) = &presentation_follow_up {
-        agent_message.push_str(&presentation_api::follow_up_context(state, receipt).map_err(|error| err_reply(&error))?);
+        agent_message.push_str(
+            &presentation_api::follow_up_context(state, receipt)
+                .map_err(|error| err_reply(&error))?,
+        );
     }
     let current_book_id = state.book.base.book_id.clone();
     let turn_ref = match precommit_agent_turn(
@@ -11659,7 +11730,11 @@ fn run_precommitted_agent_chat(
             })
         }
     };
-    let mut state_port = agent_run::RuntimeStatePort { port, turn_ref, previewed: Default::default() };
+    let mut state_port = agent_run::RuntimeStatePort {
+        port,
+        turn_ref,
+        previewed: Default::default(),
+    };
     let mut checkpoint_sink = agent_run::RunCheckpointSink { port, turn_ref };
     runtime::orchestrator::run_context(
         experimental_book.as_ref().unwrap_or(book),
@@ -12203,8 +12278,8 @@ pub fn load_session(path: &Option<PathBuf>) -> Option<SessionState> {
 
 #[cfg(test)]
 mod tests {
-    mod presentation_store_tests;
     mod presentation_author_tests;
+    mod presentation_store_tests;
     use super::*;
     use base_schema::{
         sample_base, FormulaComposition, FormulaParameter, FormulaSemantics, LidNode, NodeKind,
@@ -12755,7 +12830,7 @@ mod tests {
             profile_context_cache: runtime::profile_context::ProfileContextCache::default(),
             visitor_sessions: mcp::VisitorSessions::default(),
             workbench_loaded_revision: None,
-        active_agent_stream: None,
+            active_agent_stream: None,
         }
     }
 
@@ -13210,9 +13285,12 @@ mod tests {
         let mut s = state_named("lx4-reader-metrics");
         write_current_book_files(&s);
         s.reader_only = true;
-        let event = post_at(&mut s, "/build_intent/usage.event",
+        let event = post_at(
+            &mut s,
+            "/build_intent/usage.event",
             r#"{"event_id":"lx4-ready","kind":"reader_ready","occurred_at":"2026-09-08T04:00:00.000Z"}"#,
-            "2026-09-08T04:00:00.000Z");
+            "2026-09-08T04:00:00.000Z",
+        );
         assert_eq!(event.status, 200, "{}", event.body);
         let report = get_at(&mut s, "/build_intent/usage", "2026-09-08T05:00:00.000Z");
         assert_eq!(report.status, 200, "{}", report.body);
@@ -13229,24 +13307,40 @@ mod tests {
         for (desktop, reader_only) in [(true, false), (false, false), (false, true)] {
             state.desktop_host = desktop;
             state.reader_only = reader_only;
-            let status: Value = serde_json::from_str(&get(&mut state, "/desktop/status").body).unwrap();
+            let status: Value =
+                serde_json::from_str(&get(&mut state, "/desktop/status").body).unwrap();
             assert_eq!(status["desktop_host"], desktop);
             assert_eq!(status["reader_only"], reader_only);
         }
-        for path in ["/book/create", "/build_workbench/job.create", "/build_workbench/job.start",
-            "/build_workbench/job.resume", "/build_workbench/input.import", "/build_intent/draft",
-            "/build_intent/confirm", "/build_intent/artifact.prepare"] {
+        for path in [
+            "/book/create",
+            "/build_workbench/job.create",
+            "/build_workbench/job.start",
+            "/build_workbench/job.resume",
+            "/build_workbench/input.import",
+            "/build_intent/draft",
+            "/build_intent/confirm",
+            "/build_intent/artifact.prepare",
+        ] {
             let reply = post(&mut state, path, "{}");
             assert_eq!(reply.status, 403, "{path}: {}", reply.body);
             assert!(reply.body.contains("READER_ONLY_UNSUPPORTED"));
         }
         assert!(!state.book_dir.join(".build").exists());
-        for (path, method) in [("/build_intent/artifacts", "GET"), ("/build_intent/usage", "GET"),
-            ("/build_intent/usage.event", "POST"), ("/book/open", "POST"), ("/agent/chat", "POST")] {
+        for (path, method) in [
+            ("/build_intent/artifacts", "GET"),
+            ("/build_intent/usage", "GET"),
+            ("/build_intent/usage.event", "POST"),
+            ("/book/open", "POST"),
+            ("/agent/chat", "POST"),
+        ] {
             assert!(!reader_only_disallows(path, method));
         }
         state.reader_only = false;
-        assert_ne!(post(&mut state, "/build_workbench/job.start", "{}").status, 403);
+        assert_ne!(
+            post(&mut state, "/build_workbench/job.start", "{}").status,
+            403
+        );
     }
 
     #[test]
@@ -13448,8 +13542,11 @@ mod tests {
             let mut result = BTreeMap::new();
             for entry in std::fs::read_dir(root).unwrap() {
                 let path = entry.unwrap().path();
-                if path.is_dir() { result.extend(files(&path)); }
-                else { result.insert(path.clone(), std::fs::read(path).unwrap()); }
+                if path.is_dir() {
+                    result.extend(files(&path));
+                } else {
+                    result.insert(path.clone(), std::fs::read(path).unwrap());
+                }
             }
             result
         }
@@ -13472,15 +13569,20 @@ mod tests {
         }
         assert_eq!(files(&s.book_dir), before);
         std::fs::remove_file(s.book_dir.join(".build/source-reconciliation/report.json")).unwrap();
-        let response: Value = serde_json::from_str(&get(&mut s, "/book/build_workbench").body).unwrap();
+        let response: Value =
+            serde_json::from_str(&get(&mut s, "/book/build_workbench").body).unwrap();
         assert_eq!(response["readiness"]["route"], "workbench");
-        assert_eq!(response["readiness"]["stages"]["source_reconciliation"]["status"], "missing");
+        assert_eq!(
+            response["readiness"]["stages"]["source_reconciliation"]["status"],
+            "missing"
+        );
 
         let mut technical = state_named("lx3-technical");
         write_current_book_files(&technical);
         technical.reader_only = true;
         let before = files(&technical.book_dir);
-        let response: Value = serde_json::from_str(&get(&mut technical, "/book/build_workbench").body).unwrap();
+        let response: Value =
+            serde_json::from_str(&get(&mut technical, "/book/build_workbench").body).unwrap();
         assert_eq!(response["readiness"]["route"], "reader");
         assert_eq!(files(&technical.book_dir), before);
     }
@@ -16340,7 +16442,7 @@ unchanged after training concludes";
             profile_context_cache: runtime::profile_context::ProfileContextCache::default(),
             visitor_sessions: mcp::VisitorSessions::default(),
             workbench_loaded_revision: None,
-        active_agent_stream: None,
+            active_agent_stream: None,
         };
 
         let ok = get(&mut s, "/book/formula_semantics?lid=1.1");
@@ -18050,8 +18152,11 @@ unchanged after training concludes";
             for entry in std::fs::read_dir(source).unwrap() {
                 let entry = entry.unwrap();
                 let next = target.join(entry.file_name());
-                if entry.path().is_dir() { copy_private_dir(&entry.path(), &next); }
-                else { std::fs::copy(entry.path(), next).unwrap(); }
+                if entry.path().is_dir() {
+                    copy_private_dir(&entry.path(), &next);
+                } else {
+                    std::fs::copy(entry.path(), next).unwrap();
+                }
             }
         }
         let original_private = s.intent_store_root.clone().unwrap();
@@ -18060,7 +18165,10 @@ unchanged after training concludes";
         s.intent_store_root = Some(migrated_private);
         let migrated = get(&mut s, "/build_intent/artifacts");
         assert_eq!(migrated.status, 200, "{}", migrated.body);
-        assert_eq!(serde_json::from_str::<Value>(&migrated.body).unwrap(), projected_body);
+        assert_eq!(
+            serde_json::from_str::<Value>(&migrated.body).unwrap(),
+            projected_body
+        );
         s.intent_store_root = Some(original_private);
 
         assert_eq!(
@@ -18677,7 +18785,8 @@ unchanged after training concludes";
         s.book = (Book::new(
             multi_leaf_base("note-placement-markdown-routes", 2),
             &source,
-        )).into();
+        ))
+        .into();
         s.reader = Reader::new(&s.book, DEFAULT_RADIUS);
         std::fs::write(s.book_dir.join("source.txt"), &source).unwrap();
         let source_fingerprint = current_note_source_fingerprint(&s.book_dir).unwrap();
@@ -19410,7 +19519,7 @@ unchanged after training concludes";
             profile_context_cache: runtime::profile_context::ProfileContextCache::default(),
             visitor_sessions: mcp::VisitorSessions::default(),
             workbench_loaded_revision: None,
-        active_agent_stream: None,
+            active_agent_stream: None,
         };
 
         let r = post(
@@ -20748,7 +20857,17 @@ unchanged after training concludes";
             delivery_diagnostics: None,
             request_audit: Default::default(),
         };
-        { let messages = state.messages.clone(); finalize_agent_turn_completed(state, &turn_ref, &outcome, &messages, "2026-07-20T00:00:01Z") }.unwrap();
+        {
+            let messages = state.messages.clone();
+            finalize_agent_turn_completed(
+                state,
+                &turn_ref,
+                &outcome,
+                &messages,
+                "2026-07-20T00:00:01Z",
+            )
+        }
+        .unwrap();
         (turn_ref.turn_id, source_ref_id)
     }
 
@@ -20784,7 +20903,17 @@ unchanged after training concludes";
             delivery_diagnostics: None,
             request_audit: Default::default(),
         };
-        { let messages = state.messages.clone(); finalize_agent_turn_completed(state, &turn_ref, &outcome, &messages, "2026-07-20T00:00:01Z") }.unwrap();
+        {
+            let messages = state.messages.clone();
+            finalize_agent_turn_completed(
+                state,
+                &turn_ref,
+                &outcome,
+                &messages,
+                "2026-07-20T00:00:01Z",
+            )
+        }
+        .unwrap();
         turn_ref.turn_id
     }
 
@@ -20857,8 +20986,17 @@ unchanged after training concludes";
                 delivery_diagnostics: None,
                 request_audit: Default::default(),
             };
-            { let messages = state.messages.clone(); finalize_agent_turn_completed(&mut state, &turn_ref, &outcome, &messages, "2026-07-24T00:00:01Z") }
-                .unwrap();
+            {
+                let messages = state.messages.clone();
+                finalize_agent_turn_completed(
+                    &mut state,
+                    &turn_ref,
+                    &outcome,
+                    &messages,
+                    "2026-07-24T00:00:01Z",
+                )
+            }
+            .unwrap();
         }
 
         let persisted = std::fs::read_to_string(&history_path).unwrap();
@@ -20944,8 +21082,17 @@ unchanged after training concludes";
             request_audit: Default::default(),
         };
 
-        { let messages = state.messages.clone(); finalize_agent_turn_completed(&mut state, &turn_ref, &outcome, &messages, "2026-07-20T00:00:01Z") }
-            .unwrap();
+        {
+            let messages = state.messages.clone();
+            finalize_agent_turn_completed(
+                &mut state,
+                &turn_ref,
+                &outcome,
+                &messages,
+                "2026-07-20T00:00:01Z",
+            )
+        }
+        .unwrap();
 
         let persisted = std::fs::read_to_string(&history_path).unwrap();
         assert!(persisted.contains("delivery_diagnostics"));
@@ -20985,6 +21132,73 @@ unchanged after training concludes";
         let public_outcome = serde_json::to_string(&outcome).unwrap();
         assert!(!public_outcome.contains("delivery_diagnostics"));
         assert!(!public_outcome.contains("RAW_LID_LEAK"));
+    }
+
+    #[test]
+    fn repaired_answer_survives_turn_limit_finalization() {
+        let mut state = state_named("repaired-answer-at-turn-limit");
+        let book_id = state.book.base.book_id.clone();
+        let turn_ref = precommit_agent_turn(
+            &mut state,
+            &book_id,
+            "Explain the formula".into(),
+            None,
+            None,
+            None,
+            "2026-09-19T00:00:00Z",
+        )
+        .unwrap();
+        let diagnostics = AnswerDeliveryDiagnostics {
+            initial: runtime::orchestrator::AnswerDeliveryAttemptDiagnostics {
+                issues: vec![runtime::orchestrator::AnswerDeliveryIssue {
+                    error_code: "RAW_LID_LEAK".into(),
+                    start: Some(4),
+                    end: Some(7),
+                    trigger_value: Some("1.1".into()),
+                    match_form: "explicit_lid".into(),
+                    source_channels: vec!["tool_argument:book.text:lid".into()],
+                }],
+            },
+            repair: Some(runtime::orchestrator::AnswerDeliveryAttemptDiagnostics {
+                issues: Vec::new(),
+            }),
+        };
+        let outcome = OuterOutcome {
+            answer: Some("这是修复后可交付的答案。".into()),
+            answer_view: None,
+            incomplete: true,
+            warning: Some("TURN_LIMIT_EXCEEDED".into()),
+            turns: 12,
+            tokens_spent: 42,
+            effects: Vec::new(),
+            trace: Vec::new(),
+            profile_usage: ProfileUsageTrace::default(),
+            memory_updates: Vec::new(),
+            source_bindings: Vec::new(),
+            delivery_diagnostics: Some(diagnostics.clone()),
+            request_audit: Default::default(),
+        };
+
+        {
+            let messages = state.messages.clone();
+            finalize_agent_turn_completed(
+                &mut state,
+                &turn_ref,
+                &outcome,
+                &messages,
+                "2026-09-19T00:00:01Z",
+            )
+        }
+        .unwrap();
+
+        let turn = &state.agent_history.sessions[0].turns[0];
+        assert_eq!(turn.delivery_diagnostics, Some(diagnostics));
+        let persisted = turn.outcome.as_ref().unwrap();
+        assert_eq!(
+            persisted.answer.as_deref(),
+            Some("这是修复后可交付的答案。")
+        );
+        assert_eq!(persisted.warning.as_deref(), Some("TURN_LIMIT_EXCEEDED"));
     }
 
     #[test]
@@ -21067,8 +21281,17 @@ unchanged after training concludes";
             assert!(!reply.body.contains(hidden), "HTTP reply leaked {hidden}");
         }
 
-        { let messages = state.messages.clone(); finalize_agent_turn_completed(&mut state, &turn_ref, &outcome, &messages, "2026-07-20T00:00:01Z") }
-            .unwrap();
+        {
+            let messages = state.messages.clone();
+            finalize_agent_turn_completed(
+                &mut state,
+                &turn_ref,
+                &outcome,
+                &messages,
+                "2026-07-20T00:00:01Z",
+            )
+        }
+        .unwrap();
         let persisted = std::fs::read_to_string(&history_path).unwrap();
         assert!(!persisted.contains("request_audit"));
         assert!(!persisted.contains("agent_request_audit.v2"));
@@ -21341,36 +21564,69 @@ Version 1.2 and bare 1.1 stay unchanged.
 
     #[test]
     fn agent_source_live_binding_withdrawal_and_durable_handoff() {
-        use runtime::run_events::RunEventSink;
+        use crate::agent_stream::{RunDescriptor, RunStream};
         use runtime::answer_stream::AnswerPatch;
-        use crate::agent_stream::{RunStream, RunDescriptor};
+        use runtime::run_events::RunEventSink;
         let mut state = state_named("as8-live-source");
-        let (turn_id, source_ref_id) = install_source_bound_turn(&mut state, tmp("as8-source-history"));
+        let (turn_id, source_ref_id) =
+            install_source_bound_turn(&mut state, tmp("as8-source-history"));
         let saved = state.agent_history.sessions[0].turns[0].clone();
         let bindings = saved.source_bindings.clone();
         let view = saved.outcome.as_ref().unwrap().answer_view.clone();
         let turn = &mut state.agent_history.sessions[0].turns[0];
         turn.status = AgentAssistantStatus::PendingAssistant;
-        turn.source_bindings.clear(); turn.outcome = None;
-        let stream = RunStream::new(RunDescriptor { book_id: state.book.base.book_id.clone(), session_id: state.agent_history.sessions[0].id.clone(), turn_id: turn_id.clone() });
+        turn.source_bindings.clear();
+        turn.outcome = None;
+        let stream = RunStream::new(RunDescriptor {
+            book_id: state.book.base.book_id.clone(),
+            session_id: state.agent_history.sessions[0].id.clone(),
+            turn_id: turn_id.clone(),
+        });
         state.active_agent_stream = Some(std::sync::Arc::downgrade(&stream));
         let request = json!({"turn_id":turn_id,"source_ref_id":source_ref_id}).to_string();
         stream.source_bindings(&bindings);
-        assert_ne!(post(&mut state, "/agent/source.resolve", &request).status, 200);
-        let patch = |revision, view| AnswerPatch { message_id:1, revision, operation:"replace".into(), view };
+        assert_ne!(
+            post(&mut state, "/agent/source.resolve", &request).status,
+            200
+        );
+        let patch = |revision, view| AnswerPatch {
+            message_id: 1,
+            revision,
+            operation: "replace".into(),
+            view,
+        };
         stream.answer_patch(patch(0, view.clone()));
-        assert_eq!(post(&mut state, "/agent/source.resolve", &request).status, 200);
+        assert_eq!(
+            post(&mut state, "/agent/source.resolve", &request).status,
+            200
+        );
         assert_eq!(post(&mut state, "/agent/source.open", &request).status, 200);
         assert!(state.reader.revision() > 0);
-        assert!(stream.source_binding("another-book", &turn_id, &source_ref_id).is_none());
-        assert!(!serde_json::to_string(&stream.snapshot()).unwrap().contains("evidence_range"));
+        assert!(stream
+            .source_binding("another-book", &turn_id, &source_ref_id)
+            .is_none());
+        assert!(!serde_json::to_string(&stream.snapshot())
+            .unwrap()
+            .contains("evidence_range"));
         stream.answer_patch(patch(1, None));
-        assert_ne!(post(&mut state, "/agent/source.resolve", &request).status, 200);
+        assert_ne!(
+            post(&mut state, "/agent/source.resolve", &request).status,
+            200
+        );
         stream.answer_patch(patch(0, view.clone()));
-        assert_ne!(post(&mut state, "/agent/source.resolve", &request).status, 200);
+        assert_ne!(
+            post(&mut state, "/agent/source.resolve", &request).status,
+            200
+        );
         state.agent_history.sessions[0].turns[0] = saved;
-        stream.finish(Some(json!({"status":"completed","outcome":{"answer_view":view}})), None);
-        assert_eq!(post(&mut state, "/agent/source.resolve", &request).status, 200);
+        stream.finish(
+            Some(json!({"status":"completed","outcome":{"answer_view":view}})),
+            None,
+        );
+        assert_eq!(
+            post(&mut state, "/agent/source.resolve", &request).status,
+            200
+        );
         assert_eq!(post(&mut state, "/agent/source.open", &request).status, 200);
     }
 
@@ -21394,13 +21650,20 @@ Version 1.2 and bare 1.1 stay unchanged.
         assert_eq!(resolved_json["stale"], false);
         assert_eq!(resolved_json["can_open_in_reader"], true);
         assert!(!resolved.body.contains("1.1"));
-        assert!(!session_path.exists(), "popup resolution must not save a navigation");
+        assert!(
+            !session_path.exists(),
+            "popup resolution must not save a navigation"
+        );
 
         let opened = post(&mut state, "/agent/source.open", &request);
         assert_eq!(opened.status, 200, "{}", opened.body);
         assert!(!opened.body.contains("lid"));
-        let saved = load_session(&Some(session_path)).expect("source opening must persist position");
-        assert_eq!(saved.current_top_lid(), Some(state.reader.viewport().top_lid.as_str()));
+        let saved =
+            load_session(&Some(session_path)).expect("source opening must persist position");
+        assert_eq!(
+            saved.current_top_lid(),
+            Some(state.reader.viewport().top_lid.as_str())
+        );
 
         let current_book_id = state.book.base.book_id.clone();
         let second = precommit_agent_turn(
@@ -21695,15 +21958,45 @@ Version 1.2 and bare 1.1 stay unchanged.
         state.reader = Reader::new(&state.book, DEFAULT_RADIUS);
         let session_path = tmp("agent-navigation-session-file");
         state.session_path = Some(session_path.clone());
-        let target = state.book.base.lid_nodes.iter().filter(|node| node.children.is_empty()).last().unwrap().lid.clone();
+        let target = state
+            .book
+            .base
+            .lid_nodes
+            .iter()
+            .filter(|node| node.children.is_empty())
+            .last()
+            .unwrap()
+            .lid
+            .clone();
         state.adapter = Box::new(ChatStubAdapter::scripted(vec![
-            AssistantTurn { text: None, tool_calls: vec![runtime::ToolCall { id: "go".into(), name: "reader.gotoLid".into(), arguments: json!({"lid":target}).to_string() }], usage_total_tokens: Some(1) },
-            AssistantTurn { text: Some("done".into()), tool_calls: vec![], usage_total_tokens: Some(1) },
+            AssistantTurn {
+                text: None,
+                tool_calls: vec![runtime::ToolCall {
+                    id: "go".into(),
+                    name: "reader.gotoLid".into(),
+                    arguments: json!({"lid":target}).to_string(),
+                }],
+                usage_total_tokens: Some(1),
+            },
+            AssistantTurn {
+                text: Some("done".into()),
+                tool_calls: vec![],
+                usage_total_tokens: Some(1),
+            },
         ]));
-        let reply = post_at(&mut state, "/agent/chat", &json!({"message":format!("请跳转到 {target}")}).to_string(), "2026-09-08T00:00:00Z");
+        let reply = post_at(
+            &mut state,
+            "/agent/chat",
+            &json!({"message":format!("请跳转到 {target}")}).to_string(),
+            "2026-09-08T00:00:00Z",
+        );
         assert_eq!(reply.status, 200, "{}", reply.body);
-        let saved = load_session(&Some(session_path)).expect("Agent navigation must persist the current viewport");
-        assert_eq!(saved.current_top_lid(), Some(state.reader.viewport().top_lid.as_str()));
+        let saved = load_session(&Some(session_path))
+            .expect("Agent navigation must persist the current viewport");
+        assert_eq!(
+            saved.current_top_lid(),
+            Some(state.reader.viewport().top_lid.as_str())
+        );
     }
 
     #[test]
@@ -21712,19 +22005,51 @@ Version 1.2 and bare 1.1 stay unchanged.
         let history_path = tmp("finalization-protocol-history");
         state.history_path = Some(history_path.clone());
         let before = serde_json::to_value(state.reader.state()).unwrap();
-        state.adapter = Box::new(ChatStubAdapter::scripted((0..3).map(|i| AssistantTurn {
-            text: None,
-            tool_calls: vec![runtime::ToolCall { id: format!("call{i}"), name: if i == 2 { "reader.highlight" } else { "book.text" }.into(), arguments: if i == 2 { r#"{"lid":"1.1"}"#.into() } else { format!(r#"{{"invalid":{i}}}"#) } }],
-            usage_total_tokens: Some(1),
-        }).collect()));
-        let reply = post_at(&mut state, "/agent/chat", r#"{"message":"只解释原文"}"#, "2026-09-08T00:00:00Z");
+        state.adapter = Box::new(ChatStubAdapter::scripted(
+            (0..3)
+                .map(|i| AssistantTurn {
+                    text: None,
+                    tool_calls: vec![runtime::ToolCall {
+                        id: format!("call{i}"),
+                        name: if i == 2 {
+                            "reader.highlight"
+                        } else {
+                            "book.text"
+                        }
+                        .into(),
+                        arguments: if i == 2 {
+                            r#"{"lid":"1.1"}"#.into()
+                        } else {
+                            format!(r#"{{"invalid":{i}}}"#)
+                        },
+                    }],
+                    usage_total_tokens: Some(1),
+                })
+                .collect(),
+        ));
+        let reply = post_at(
+            &mut state,
+            "/agent/chat",
+            r#"{"message":"只解释原文"}"#,
+            "2026-09-08T00:00:00Z",
+        );
         assert_eq!(reply.status, 500, "{}", reply.body);
         assert!(reply.body.contains("FINALIZATION_TOOL_PROTOCOL_VIOLATION"));
         assert_eq!(serde_json::to_value(state.reader.state()).unwrap(), before);
-        assert!(state.store.recall(&memory::RecallQuery { mem_type: Some("highlight".into()), ..Default::default() }).is_empty());
-        let history = serde_json::to_value(load_agent_history(&Some(history_path)).unwrap()).unwrap();
+        assert!(state
+            .store
+            .recall(&memory::RecallQuery {
+                mem_type: Some("highlight".into()),
+                ..Default::default()
+            })
+            .is_empty());
+        let history =
+            serde_json::to_value(load_agent_history(&Some(history_path)).unwrap()).unwrap();
         assert_eq!(history["sessions"][0]["turns"][0]["status"], "failed");
-        assert_eq!(history["sessions"][0]["turns"][0]["error"]["error_code"], "FINALIZATION_TOOL_PROTOCOL_VIOLATION");
+        assert_eq!(
+            history["sessions"][0]["turns"][0]["error"]["error_code"],
+            "FINALIZATION_TOOL_PROTOCOL_VIOLATION"
+        );
     }
 
     #[test]

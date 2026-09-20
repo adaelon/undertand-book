@@ -130,6 +130,19 @@ fn chat(running: &RunningServer, message: &str) -> JoinHandle<(u16, Value)> {
 }
 
 #[test]
+fn observability_status_endpoint_exposes_only_safe_runtime_state() {
+    let (running, _) = fixture("observability-status");
+    let expected = serde_json::to_value(running.observability_status()).unwrap();
+    let (status, body) = http(&running.url, "GET", "/observability/status", Value::Null);
+    assert_eq!(status, 200);
+    assert_eq!(body, expected);
+    let serialized = body.to_string();
+    assert!(!serialized.contains("api_key"));
+    assert!(!serialized.contains("endpoint"));
+    running.shutdown();
+}
+
+#[test]
 fn resident_model_wait_releases_state_and_preserves_concurrent_reader_memory_and_history() {
     let provider = Provider::new();
     let (running, root) = fixture("concurrent");
@@ -553,26 +566,45 @@ fn resident_stream_can_finish_after_sixty_seconds() {
         loop {
             let mut line = String::new();
             reader.read_line(&mut line).unwrap();
-            if line == "\r\n" { break; }
+            if line == "\r\n" {
+                break;
+            }
             if let Some(value) = line.to_lowercase().strip_prefix("content-length:") {
                 length = value.trim().parse().unwrap();
             }
         }
         reader.read_exact(&mut vec![0; length]).unwrap();
-        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").unwrap();
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
         // The provider is alive throughout; a total 60-second deadline must not cut it off.
         for _ in 0..65 {
-            if socket.write_all(b": generating\n\n").is_err() { return; }
+            if socket.write_all(b": generating\n\n").is_err() {
+                return;
+            }
             thread::sleep(Duration::from_secs(1));
         }
         let body = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"完成。\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
         let _ = socket.write_all(body.as_bytes());
     });
     let (running, _) = fixture("long-resident-stream");
-    running.set_provider_config(ProviderConfig::from_values("native", "test-key", format!("http://{address}"), "test-model").unwrap());
+    running.set_provider_config(
+        ProviderConfig::from_values(
+            "native",
+            "test-key",
+            format!("http://{address}"),
+            "test-model",
+        )
+        .unwrap(),
+    );
     let started = std::time::Instant::now();
-    let mut client = std::net::TcpStream::connect(running.url.strip_prefix("http://").unwrap()).unwrap();
-    client.set_read_timeout(Some(Duration::from_secs(90))).unwrap();
+    let mut client =
+        std::net::TcpStream::connect(running.url.strip_prefix("http://").unwrap()).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(90)))
+        .unwrap();
     let body = json!({"message":"请简短回答完成。"}).to_string();
     write!(client, "POST /agent/chat HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
     let mut wire = String::new();
@@ -582,7 +614,10 @@ fn resident_stream_can_finish_after_sixty_seconds() {
     assert!(started.elapsed() >= Duration::from_secs(60));
     assert!(response.get("error_code").is_none(), "{response}");
     let state = running.state.lock().unwrap();
-    assert_eq!(state.agent_history.sessions[0].turns[0].status, AgentAssistantStatus::Completed);
+    assert_eq!(
+        state.agent_history.sessions[0].turns[0].status,
+        AgentAssistantStatus::Completed
+    );
     drop(state);
     running.shutdown();
 }

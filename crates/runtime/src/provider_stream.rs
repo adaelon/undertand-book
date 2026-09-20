@@ -1,10 +1,31 @@
 //! Chat-completions wire events. Observers never dispatch tools.
 use crate::{run_context::CancellationToken, AdapterError};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     io::{BufRead, BufReader, Read},
 };
+use ts_rs::TS;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ModelUsage {
+    pub input_tokens: Option<u32>,
+    pub output_tokens: Option<u32>,
+    pub cached_input_tokens: Option<u32>,
+    pub cache_creation_input_tokens: Option<u32>,
+    pub total_tokens: Option<u32>,
+}
+
+impl ModelUsage {
+    pub fn has_any_value(&self) -> bool {
+        self.input_tokens.is_some()
+            || self.output_tokens.is_some()
+            || self.cached_input_tokens.is_some()
+            || self.cache_creation_input_tokens.is_some()
+            || self.total_tokens.is_some()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModelDelta {
@@ -15,7 +36,9 @@ pub enum ModelDelta {
         name: String,
         arguments: String,
     },
-    Usage(u32),
+    /// A cumulative Provider snapshot. Repeated frames replace the previous snapshot; callers
+    /// must never add them together.
+    Usage(ModelUsage),
     Finish(String),
 }
 pub trait ModelObserver {
@@ -31,6 +54,37 @@ fn error(message: impl ToString) -> AdapterError {
     AdapterError {
         message: message.to_string(),
     }
+}
+
+fn usage_u32(value: &Value) -> Option<u32> {
+    value.as_u64().and_then(|value| u32::try_from(value).ok())
+}
+
+pub fn model_usage(value: &Value) -> Option<ModelUsage> {
+    let usage = value.get("usage")?;
+    if !usage.is_object() {
+        return None;
+    }
+    let input_tokens = usage_u32(&usage["prompt_tokens"])
+        .or_else(|| usage_u32(&usage["input_tokens"]));
+    let output_tokens = usage_u32(&usage["completion_tokens"])
+        .or_else(|| usage_u32(&usage["output_tokens"]));
+    let cached_input_tokens = usage_u32(&usage["prompt_tokens_details"]["cached_tokens"])
+        .or_else(|| usage_u32(&usage["input_tokens_details"]["cached_tokens"]))
+        .or_else(|| usage_u32(&usage["input_token_details"]["cache_read"]));
+    let cache_creation_input_tokens =
+        usage_u32(&usage["input_tokens_details"]["cache_creation_tokens"])
+            .or_else(|| usage_u32(&usage["input_token_details"]["cache_creation"]));
+    let total_tokens = usage_u32(&usage["total_tokens"])
+        .or_else(|| input_tokens.zip(output_tokens).map(|(input, output)| input + output));
+    let snapshot = ModelUsage {
+        input_tokens,
+        output_tokens,
+        cached_input_tokens,
+        cache_creation_input_tokens,
+        total_tokens,
+    };
+    snapshot.has_any_value().then_some(snapshot)
 }
 
 pub fn read_response(
@@ -50,8 +104,8 @@ pub fn read_response(
         read_sse(response.into_reader(), cancellation, observer)
     } else {
         let value: Value = response.into_json().map_err(error)?;
-        if let Some(usage) = value["usage"]["total_tokens"].as_u64() {
-            observer.observe(ModelDelta::Usage(usage as u32));
+        if let Some(usage) = model_usage(&value) {
+            observer.observe(ModelDelta::Usage(usage));
         }
         cancellation.check().map_err(|e| error(e.message))?;
         Ok(value)
@@ -106,8 +160,11 @@ pub fn read_sse(
         if !value["error"].is_null() {
             return Err(error(format!("Provider stream error: {}", value["error"])));
         }
-        if let Some(total) = value["usage"]["total_tokens"].as_u64() {
-            usage = json!({"total_tokens": total});
+        if let Some(snapshot) = model_usage(&value) {
+            usage = value["usage"].clone();
+            // Emit each cumulative snapshot immediately so a later truncated stream still
+            // preserves the last Provider-reported usage. ObservedAdapter replaces, not sums.
+            observer.observe(ModelDelta::Usage(snapshot));
         }
         for choice in value["choices"]
             .as_array()
@@ -176,9 +233,6 @@ pub fn read_sse(
     }
     if !tool_calls.is_empty() && finish.as_deref() != Some("tool_calls") {
         return Err(error("Tool calls without tool finish"));
-    }
-    if let Some(total) = usage["total_tokens"].as_u64() {
-        observer.observe(ModelDelta::Usage(total as u32));
     }
     observer.observe(ModelDelta::Finish(finish.clone().unwrap()));
     Ok(
@@ -341,5 +395,47 @@ mod tests {
         let cancel = token.clone();
         let wire = frame(json!({"content":"中文"}), Value::Null) + &frame(json!({}), json!("stop"));
         assert!(read_sse(wire.as_bytes(), &token, &mut |_| cancel.cancel()).is_err());
+    }
+
+    #[test]
+    fn usage_preserves_provider_breakdown_and_total_only_snapshots() {
+        assert_eq!(
+            model_usage(&json!({"usage": {
+                "prompt_tokens": 21,
+                "completion_tokens": 8,
+                "total_tokens": 29,
+                "prompt_tokens_details": {"cached_tokens": 3}
+            }})),
+            Some(ModelUsage {
+                input_tokens: Some(21),
+                output_tokens: Some(8),
+                cached_input_tokens: Some(3),
+                cache_creation_input_tokens: None,
+                total_tokens: Some(29),
+            })
+        );
+        assert_eq!(
+            model_usage(&json!({"usage": {"total_tokens": 17}})),
+            Some(ModelUsage {
+                total_tokens: Some(17),
+                ..Default::default()
+            })
+        );
+    }
+
+    #[test]
+    fn usage_only_frame_is_observed_before_a_truncated_stream_fails() {
+        let wire = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\n";
+        let mut deltas = Vec::new();
+        assert!(read_sse(wire.as_bytes(), &Default::default(), &mut |delta| deltas.push(delta)).is_err());
+        assert_eq!(
+            deltas,
+            vec![ModelDelta::Usage(ModelUsage {
+                input_tokens: Some(5),
+                output_tokens: Some(2),
+                total_tokens: Some(7),
+                ..Default::default()
+            })]
+        );
     }
 }

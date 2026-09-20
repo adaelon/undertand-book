@@ -763,7 +763,7 @@ describe("RightRail AskQuote", () => {
 
 describe("Resident activities", () => {
   it("shares live steps with trace, emits stop and preserves upward scrolling", async () => {
-    const activity = { step_id: 1, parent_step_id: null, kind: "model", name: "outer", label: "生成回答", status: "running" as const, started_ms: 0, duration_ms: null, result_count: null, error_code: null, usage_total_tokens: null };
+    const activity = { step_id: 1, parent_step_id: null, kind: "model", name: "outer", label: "生成回答", status: "running" as const, started_ms: 0, duration_ms: null, result_count: null, error_code: null, usage_total_tokens: null, usage: null, model_first_text_ms: null, model_name: null, model_name_source: null, accepted_evidence_count: null, evidence_refs: [] };
     const turn = { turnId: "turn", user: "问题", outcome: null, pending: true, questionAnchorLid: null, questionQuote: null, questionSelection: null, effectLabels: [], activities: [activity], runStatus: "正在运行" };
     const wrapper = mount(RightRail, { props: { ...baseProps, chat: [turn], sending: true, canStop: true } });
     expect(wrapper.find(".transcript .agent-activity").attributes("data-status")).toBe("running");

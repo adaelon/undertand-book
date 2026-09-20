@@ -84,6 +84,26 @@ cargo run -p server --bin server -- .understand-book/quickstart-demo
 
 要启用 AI 回答，将 [.env.example](.env.example) 复制为 `.env`，填入所选服务的密钥、Base URL 与模型 ID，重启服务。模型调用会将问题与选取的原文发送给该服务，并产生相应费用。
 
+### 可选 LangSmith 元数据观测
+
+Resident Agent 的开发者观测默认关闭。只有本项目自己的 `UB_OBSERVABILITY_MODE=metadata` 会开启发送；仅存在 `LANGSMITH_API_KEY` 或 `LANGSMITH_TRACING=true` 不会自动外发。开启时配置：
+
+```powershell
+$env:UB_OBSERVABILITY_MODE = "metadata"
+$env:LANGSMITH_API_KEY = "..."
+$env:LANGSMITH_PROJECT = "understand-book-dev"
+# 区域或自管部署时覆盖；默认 https://api.smith.langchain.com
+$env:LANGSMITH_ENDPOINT = "https://api.smith.langchain.com"
+# 一个 key 关联多个 workspace 时设置
+$env:LANGSMITH_WORKSPACE_ID = "..."
+```
+
+Resident metadata 发送执行树、三轴终态、基本耗时、Provider 报告的用量细分、首字/首个安全答案补丁时间、证据接纳坐标、最终来源引用和交付/请求诊断计数；inputs/outputs 为空，不发送问题、回答、工具参数/结果、来源预览、选区、画像、Provider 错误体或呈现 HTML。可用 `GET /observability/status` 查看启用、排队、发送、丢弃及规范错误状态，其中不含密钥或端点。
+
+可选设置 `UB_OBSERVABILITY_SPOOL_DIR` 启用已过滤记录的持久 spool；默认上限为 64 MiB、4096 个文件、保留 24 小时，可分别用 `UB_OBSERVABILITY_SPOOL_MAX_BYTES`、`UB_OBSERVABILITY_SPOOL_MAX_FILES`、`UB_OBSERVABILITY_SPOOL_RETENTION_HOURS` 调整。spool 必须位于书库、构建 lease 和 Memory 真相源之外。崩溃重启只重放观测，未闭合根按最后已观察时间标记 `interrupted`，不会重跑模型或工具。项目、区域或 workspace 改变时默认把旧队列隔离；只有一次性显式设置 `UB_OBSERVABILITY_SPOOL_TARGET_CHANGE=replay` 或 `drop` 才会重投或删除。关闭模式清理本项目拥有的未发送 spool 文件，不撤回已上传数据。
+
+未配置 spool 时 Resident 队列只驻留内存，进程崩溃可能丢失；两种模式的退出都只在两秒预算内冲刷，也都不是 exactly-once。预构建回执可由显式开发/诊断调用只读导出；评测导入另需显式 `eval_content` 授权和每个产品样本的真实绝对时间，旧的 elapsed-only 报告不会发送。Harness 未落账调用仍不在统计内，不能把当前 token 字段当作全应用账单。真实 LangSmith 租户联调尚未执行。
+
 已有完整书库可直接替换最后一项路径，例如：
 
 ```powershell

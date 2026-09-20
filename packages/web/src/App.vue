@@ -71,6 +71,11 @@ import {
   type PdfUserAnnotationProjection,
 } from "./pdf-annotation-projection";
 import { renderInlineMarkdown, renderMarkdown } from "./md";
+import {
+  createMarkdownDomSourceMap,
+  markMarkdownDomSourceRanges,
+  type MarkedSourceRange,
+} from "./markdown-source-map";
 import { desktopLibraryNeedsSelection } from "./desktop-library";
 import {
   desktopProviderDraft,
@@ -1055,37 +1060,25 @@ function sourceFocusRange(text: string, focus: SourceFocus | null, lid: string):
   return [0, text.length];
 }
 
-// 段正文渲染:把段内 range 高亮包成 <mark>(合并重叠区间),其余文本转义防 XSS `[ADR-0031]`。
+// 段正文渲染:先完整渲染 Markdown,再把规范 source range 投影到 DOM 包 <mark>,避免切断行内语法 `[ADR-0031]`。
 // chapter/section 的 Markdown 标题符号只在显示层剥掉,不改 book.text 原文与 LID 锚点。
 function renderSegWithFocus(seg: Segment, focus: SourceFocus | null, sourceSegments: Segment[], includeStoredHighlights: boolean): string {
   const display = isRawAssetSegment(seg) ? { text: seg.text, offset: 0 } : displayText(seg);
   const hls = includeStoredHighlights ? highlightsOf(seg.lid).filter((h) => h.range) : [];
   const focusRange = sourceFocusRangesIn(sourceSegments, focus).get(seg.lid) ?? sourceFocusRange(display.text, focus, seg.lid);
   if (hls.length === 0 && !focusRange) return renderSegmentText(seg, display.text);
-  const ranges = hls
+  const ranges: MarkedSourceRange[] = hls
     .map((h) => {
       const start = clampRange(h.range!.start - display.offset, display.text.length);
       const end = clampRange(h.range!.end - display.offset, display.text.length);
-      return [start, end] as [number, number];
+      return { start, end, className: "hl-mark" };
     })
-    .filter(([start, end]) => end > start);
-  if (focusRange) ranges.push(focusRange);
-  ranges.sort((a, b) => a[0] - b[0]);
-  const merged: [number, number][] = [];
-  for (const [s, e] of ranges) {
-    const last = merged[merged.length - 1];
-    if (last && s <= last[1]) last[1] = Math.max(last[1], e);
-    else merged.push([s, e]);
-  }
-  const t = display.text;
-  let html = "";
-  let cur = 0;
-  for (const [s, e] of merged) {
-    const cls = focusRange && s === focusRange[0] && e === focusRange[1] ? "hl-mark source-focus-mark" : "hl-mark";
-    html += renderSegmentText(seg, t.slice(cur, s)) + `<mark class="${cls}">${renderSegmentText(seg, t.slice(s, e))}</mark>`;
-    cur = e;
-  }
-  return html + renderSegmentText(seg, t.slice(cur));
+    .filter(({ start, end }) => end > start);
+  if (focusRange) ranges.push({ start: focusRange[0], end: focusRange[1], className: "hl-mark source-focus-mark" });
+  const root = document.createElement("span");
+  root.innerHTML = renderSegmentText(seg, display.text);
+  markMarkdownDomSourceRanges(display.text, root, ranges);
+  return root.innerHTML;
 }
 function renderSeg(seg: Segment): string {
   return renderSegWithFocus(seg, sourceFocus.value, segments.value, true);
@@ -2615,6 +2608,7 @@ interface MarkdownSelectionPopover {
   anchorLid: string;
   ranges: MarkdownSelectedRange[];
   text: string;
+  resolvedText: string;
 }
 const hlPopover = ref<MarkdownSelectionPopover | null>(null);
 
@@ -2623,33 +2617,28 @@ function lidElementOf(node: Node | null): HTMLElement | null {
   return el ? el.closest("[data-lid]") : null;
 }
 
-function domTextOffset(el: HTMLElement, container: Node, offset: number): number {
-  const pre = document.createRange();
-  pre.selectNodeContents(el);
-  pre.setEnd(container, offset);
-  return pre.toString().length;
-}
-
-function selectedRangeForElement(el: HTMLElement, range: Range, startEl: HTMLElement, endEl: HTMLElement): MarkdownSelectedRange | null {
+function selectedRangesForElement(el: HTMLElement, range: Range, startEl: HTMLElement, endEl: HTMLElement): MarkdownSelectedRange[] {
   const lid = el.getAttribute("data-lid") ?? "";
   const seg = lid ? segmentByLid.value.get(lid) : null;
-  if (!lid || !seg) return null;
+  if (!lid || !seg) return [];
 
   if (seg.kind === "formula") {
-    return seg.text.length > 0 ? { lid, start: 0, end: seg.text.length } : null;
+    return seg.text.length > 0 ? [{ lid, start: 0, end: seg.text.length }] : [];
   }
 
   const display = displayText(seg);
-  let start = 0;
-  let end = display.text.length;
-  if (el === startEl) start = clampRange(domTextOffset(el, range.startContainer, range.startOffset), display.text.length);
-  if (el === endEl) end = clampRange(domTextOffset(el, range.endContainer, range.endOffset), display.text.length);
-  if (end <= start) return null;
-  return {
-    lid,
-    start: clampRange(display.offset + start, seg.text.length),
-    end: clampRange(display.offset + end, seg.text.length),
-  };
+  const localRange = document.createRange();
+  localRange.selectNodeContents(el);
+  if (el === startEl) localRange.setStart(range.startContainer, range.startOffset);
+  if (el === endEl) localRange.setEnd(range.endContainer, range.endOffset);
+  return createMarkdownDomSourceMap(display.text, el)
+    .sourceRangesForRange(localRange)
+    .map(({ start, end }) => ({
+      lid,
+      start: clampRange(display.offset + start, seg.text.length),
+      end: clampRange(display.offset + end, seg.text.length),
+    }))
+    .filter(({ start, end }) => end > start);
 }
 
 function selectionRanges(range: Range): MarkdownSelectedRange[] {
@@ -2661,8 +2650,13 @@ function selectionRanges(range: Range): MarkdownSelectedRange[] {
 
   return Array.from(root.querySelectorAll<HTMLElement>("[data-lid]"))
     .filter((el) => range.intersectsNode(el))
-    .map((el) => selectedRangeForElement(el, range, startEl, endEl))
-    .filter((r): r is MarkdownSelectedRange => r !== null && r.end > r.start);
+    .flatMap((el) => selectedRangesForElement(el, range, startEl, endEl));
+}
+
+function resolvedSelectionQuote(ranges: MarkdownSelectedRange[]): string {
+  return ranges
+    .map(({ lid, start, end }) => segmentByLid.value.get(lid)?.text.slice(start, end) ?? "")
+    .join("");
 }
 
 function onSelectSeg(lid: string) {
@@ -2924,7 +2918,8 @@ function onProseSelection(snapshot: ReaderSelectionSnapshot | null) {
     return;
   }
   const quote = rangeToMarkdown(range);
-  if (!quote.trim()) {
+  const resolvedQuote = resolvedSelectionQuote(ranges);
+  if (!quote.trim() || !resolvedQuote.trim()) {
     hlPopover.value = null;
     return;
   }
@@ -2936,6 +2931,7 @@ function onProseSelection(snapshot: ReaderSelectionSnapshot | null) {
     anchorLid: ranges[0].lid,
     ranges,
     text: quote,
+    resolvedText: resolvedQuote,
   };
 }
 async function confirmHighlight() {
@@ -2961,7 +2957,7 @@ function markdownSelectionContext(popover: MarkdownSelectionPopover): SelectionC
     status: "resolved",
     resolution_basis: "exact",
     raw_quote: popover.text,
-    resolved_quote: popover.text,
+    resolved_quote: popover.resolvedText,
     ranges: popover.ranges.map((range) => ({
       lid: range.lid,
       range: { start: range.start, end: range.end },

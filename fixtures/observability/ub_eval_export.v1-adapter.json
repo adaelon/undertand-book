@@ -1,0 +1,163 @@
+{
+  "run": {
+    "version": "agent-eval-fixture-v1",
+    "started_at": "2026-09-20T00:00:00Z",
+    "finished_at": "2026-09-20T00:10:00Z",
+    "status": "completed",
+    "config": { "repeats": 1 },
+    "summary": {
+      "system-a": {
+        "count": 1,
+        "succeeded": 1,
+        "success_rate": 1,
+        "semantic_accuracy": 1,
+        "evidence_recall": 1,
+        "citation_support": 1,
+        "p95_seconds": 1.2,
+        "mean_tokens": 10,
+        "total_requests": 1,
+        "missing_usage": 0,
+        "errors": 0,
+        "incomplete": 0,
+        "private_summary": "MUST_NOT_EXPORT"
+      },
+      "system-b": {
+        "count": 1,
+        "succeeded": 0,
+        "success_rate": 0,
+        "semantic_accuracy": 0,
+        "evidence_recall": 0,
+        "citation_support": 0,
+        "p95_seconds": 2.4,
+        "mean_tokens": 20,
+        "total_requests": 2,
+        "missing_usage": 1,
+        "errors": 0,
+        "incomplete": 1
+      }
+    },
+    "qa": [
+      {
+        "id": "case-1",
+        "category": "exact",
+        "system": "system-a",
+        "answer": "CANARY_PRIVATE_ANSWER_A",
+        "elapsed_ms": 1200,
+        "score": { "success": true, "semantic_correct": true, "evidence_recall": 1 }
+      },
+      {
+        "id": "case-1",
+        "category": "exact",
+        "system": "system-b",
+        "answer": "CANARY_PRIVATE_ANSWER_B",
+        "elapsed_ms": 2400,
+        "outcome": { "incomplete": true },
+        "score": { "success": false, "semantic_correct": false, "evidence_recall": 0 }
+      }
+    ],
+    "navigation": [
+      {
+        "id": "navigation-1",
+        "category": "source",
+        "system": "system-b",
+        "answer": "CANARY_PRIVATE_NAVIGATION",
+        "elapsed_ms": 3000,
+        "navigation_ok": false,
+        "score": { "success": false, "semantic_correct": true, "evidence_recall": 1 }
+      }
+    ],
+    "restart": [
+      {
+        "id": "restart-1",
+        "kind": "note",
+        "system": "system-b",
+        "elapsed_ms": 4000,
+        "success": false,
+        "setup_ok": true,
+        "persistence_ok": false,
+        "new_chat_empty": true,
+        "memory_observed_by_agent": false
+      }
+    ]
+  },
+  "quality": {
+    "version": "historical-answer-quality-v2",
+    "status": "exploratory_pending_human_calibration",
+    "systems": {
+      "system-a": { "total": 1, "delivered": 1, "pass": 0, "fail": 0, "unscorable": 1, "product_failed": 0 },
+      "system-b": { "total": 1, "delivered": 0, "pass": 0, "fail": 0, "unscorable": 0, "product_failed": 1 }
+    },
+    "dimension_summary": {
+      "system-a": {
+        "accuracy": { "met": 1, "partial": 0, "failed": 0, "unknown": 0, "not_applicable": 0, "unscorable": 0 },
+        "completeness": { "met": 0, "partial": 0, "failed": 0, "unknown": 0, "not_applicable": 0, "unscorable": 1 },
+        "grounding": { "met": 1, "partial": 0, "failed": 0, "unknown": 0, "not_applicable": 0, "unscorable": 0 },
+        "explanation": { "met": 0, "partial": 0, "failed": 0, "unknown": 0, "not_applicable": 1, "unscorable": 0 }
+      },
+      "system-b": {
+        "accuracy": { "met": 0, "partial": 0, "failed": 0, "unknown": 0, "not_applicable": 0, "unscorable": 0 },
+        "completeness": { "met": 0, "partial": 0, "failed": 0, "unknown": 0, "not_applicable": 0, "unscorable": 0 },
+        "grounding": { "met": 0, "partial": 0, "failed": 0, "unknown": 0, "not_applicable": 0, "unscorable": 0 },
+        "explanation": { "met": 0, "partial": 0, "failed": 0, "unknown": 0, "not_applicable": 0, "unscorable": 0 }
+      }
+    },
+    "comparison": [
+      { "case_id": "quality-case-1", "winner": "anon-a", "system": "system-a" }
+    ],
+    "samples": [
+      {
+        "sample_id": "anon-a",
+        "task_id": "case-1",
+        "system": "system-a",
+        "execution": "delivered",
+        "historical_success": true,
+        "quality_status": "unscorable",
+        "order_disagreement": true,
+        "judgments": [
+          {
+            "job_id": "judge-forward",
+            "status": "pass",
+            "evaluation": {
+              "dimensions": {
+                "accuracy": { "verdict": "met" },
+                "completeness": { "verdict": "met" },
+                "grounding": { "verdict": "met" },
+                "explanation": { "verdict": "not_applicable" }
+              }
+            }
+          },
+          {
+            "job_id": "judge-reverse",
+            "status": "unscorable",
+            "evaluation": {
+              "dimensions": {
+                "accuracy": { "verdict": "met" },
+                "completeness": { "verdict": "partial" },
+                "grounding": { "verdict": "met" },
+                "explanation": { "verdict": "not_applicable" }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "sample_id": "anon-b",
+        "task_id": "case-1",
+        "system": "system-b",
+        "execution": "incomplete",
+        "historical_success": false,
+        "quality_status": "product_failed",
+        "order_disagreement": false,
+        "judgments": []
+      }
+    ],
+    "expected_judge_calls": 2,
+    "judge_calls": 2,
+    "missing_usage": 1,
+    "total_tokens": null
+  },
+  "quality_jobs": [
+    { "id": "judge-forward", "case_id": "quality-case-1", "mapping": { "A": "anon-a", "B": "anon-b" } },
+    { "id": "judge-reverse", "case_id": "quality-case-1", "mapping": { "A": "anon-b", "B": "anon-a" } }
+  ]
+}

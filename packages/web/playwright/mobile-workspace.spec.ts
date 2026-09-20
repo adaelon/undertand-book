@@ -14,8 +14,13 @@ test("keeps one core tree through repeated region and orientation-sized projecti
   await page.locator(".reader-pane").evaluate((node) => { node.setAttribute("data-instance", "reader-stable"); });
   if (viewport.width < 1024) {
     const topbar = page.locator(".topbar");
+    const mobileNavigation = page.locator(".workspace-mobile-nav");
     await expect(topbar).toBeHidden();
+    await expect(mobileNavigation).toBeVisible();
     expect((await shell.boundingBox())?.y).toBe(0);
+    const mobileNavigationBox = await mobileNavigation.boundingBox();
+    expect(mobileNavigationBox).not.toBeNull();
+    expect(mobileNavigationBox!.y + mobileNavigationBox!.height).toBeLessThanOrEqual(viewport.height + 1);
     await page.getByRole("button", { name: "菜单" }).click();
     await expect(topbar).toBeVisible();
     await topbar.getByRole("button", { name: "目录" }).click();

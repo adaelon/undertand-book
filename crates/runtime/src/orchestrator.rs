@@ -5,7 +5,7 @@
 //! dispatch 仍保留 manifest 防御分支。reader.* 是会话态阅读器(S7 接入):agent 经命令面驱动
 //! 「问→跳转→高亮→记笔记」闭环 `[ADR-0007/0015]`。
 //! 内层 book.query 复用 `crate::query`(同一 adapter 触 `complete`)`[ADR-0025]`。
-use crate::run_context::{RunContext, ResidentStatePort, BorrowedResidentState};
+use crate::run_context::{BorrowedResidentState, ResidentStatePort, RunContext};
 use crate::{
     agent_prompt::{policy_modules_for_tools, BASE_INSTRUCTIONS},
     agent_request_audit::AgentRequestAudit,
@@ -150,9 +150,16 @@ pub struct SourceBinding {
 #[ts(export, export_to = "../../../packages/web/src/generated/")]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AgentAnswerPart {
-    Markdown { text: String },
-    Sources { source_ref_ids: Vec<String> },
-    Presentation { presentation_id: String, revision: u32 },
+    Markdown {
+        text: String,
+    },
+    Sources {
+        source_ref_ids: Vec<String>,
+    },
+    Presentation {
+        presentation_id: String,
+        revision: u32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
@@ -864,8 +871,18 @@ impl TurnLocatorLedger {
                 self.observe_value_scalar(&value, "at", LocatorOrigin::StructuralIndexResult, book);
                 if let Some(nodes) = value.get("nodes").and_then(serde_json::Value::as_array) {
                     for node in nodes {
-                        self.observe_value_scalar(node, "lid", LocatorOrigin::StructuralIndexResult, book);
-                        self.observe_value_array(node, "children", LocatorOrigin::StructuralIndexResult, book);
+                        self.observe_value_scalar(
+                            node,
+                            "lid",
+                            LocatorOrigin::StructuralIndexResult,
+                            book,
+                        );
+                        self.observe_value_array(
+                            node,
+                            "children",
+                            LocatorOrigin::StructuralIndexResult,
+                            book,
+                        );
                     }
                 }
                 if let Some(unit) = value.get("spine_unit") {
@@ -925,33 +942,61 @@ impl TurnLocatorLedger {
                 }
             }
             "book.guide_path" => {
-                let Ok(value) = serde_json::from_str::<serde_json::Value>(result) else { return; };
-                if let Some(segments) = value.get("segments").and_then(serde_json::Value::as_array) {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(result) else {
+                    return;
+                };
+                if let Some(segments) = value.get("segments").and_then(serde_json::Value::as_array)
+                {
                     for segment in segments {
                         // Guide-path segments carry the same spine/key-stop projection as structure.
                         self.observe_tool_result("book.structure", &segment.to_string(), book);
                     }
                 }
             }
-            "book.route_from" | "book.guided_route_from" | "book.unvisited_back" | "book.route_to" => {
-                let Ok(value) = serde_json::from_str::<serde_json::Value>(result) else { return; };
+            "book.route_from"
+            | "book.guided_route_from"
+            | "book.unvisited_back"
+            | "book.route_to" => {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(result) else {
+                    return;
+                };
                 let mut step_lists = Vec::new();
-                for field in ["back", "forward", "concretize", "cross", "continue", "unvisited_back", "path"] {
+                for field in [
+                    "back",
+                    "forward",
+                    "concretize",
+                    "cross",
+                    "continue",
+                    "unvisited_back",
+                    "path",
+                ] {
                     if let Some(steps) = value.get(field).and_then(serde_json::Value::as_array) {
                         step_lists.push(steps);
                     }
                 }
                 if let Some(groups) = value.get("groups").and_then(serde_json::Value::as_array) {
                     for group in groups {
-                        if let Some(steps) = group.get("steps").and_then(serde_json::Value::as_array) {
+                        if let Some(steps) =
+                            group.get("steps").and_then(serde_json::Value::as_array)
+                        {
                             step_lists.push(steps);
                         }
                     }
                 }
                 for steps in step_lists {
                     for step in steps {
-                        self.observe_value_scalar(step, "lid", LocatorOrigin::NavigationPlanResult, book);
-                        self.observe_value_array(step, "evidence_lids", LocatorOrigin::NavigationPlanResult, book);
+                        self.observe_value_scalar(
+                            step,
+                            "lid",
+                            LocatorOrigin::NavigationPlanResult,
+                            book,
+                        );
+                        self.observe_value_array(
+                            step,
+                            "evidence_lids",
+                            LocatorOrigin::NavigationPlanResult,
+                            book,
+                        );
                     }
                 }
             }
@@ -979,7 +1024,10 @@ impl TurnLocatorLedger {
                 }
             }
             "book.concept" => {
-                let Ok(result) = serde_json::from_str::<read_tools::ConceptCandidateSet>(result) else { return; };
+                let Ok(result) = serde_json::from_str::<read_tools::ConceptCandidateSet>(result)
+                else {
+                    return;
+                };
                 for candidate in result.candidates {
                     for lid in candidate.occurrences {
                         self.observe_lid(&lid, LocatorOrigin::SemanticQueryResult, book);
@@ -1314,7 +1362,11 @@ impl TurnEvidenceLedger {
         self.evidence_state
     }
 
-    fn prepare_present(&self, book: &Book, arguments: &str) -> Result<(EvidenceRange, read_tools::ResolvedSource), ToolError> {
+    fn prepare_present(
+        &self,
+        book: &Book,
+        arguments: &str,
+    ) -> Result<(EvidenceRange, read_tools::ResolvedSource), ToolError> {
         let args: SourcePresentArgs =
             serde_json::from_str(arguments).map_err(|error| ToolError {
                 error_code: "INVALID_SOURCE_RANGE".into(),
@@ -1396,7 +1448,12 @@ impl TurnEvidenceLedger {
         self.present_prepared(book, evidence, resolved)
     }
 
-    fn present_prepared(&mut self, book: &Book, evidence_range: EvidenceRange, resolved: read_tools::ResolvedSource) -> Result<SourcePresentResult, ToolError> {
+    fn present_prepared(
+        &mut self,
+        book: &Book,
+        evidence_range: EvidenceRange,
+        resolved: read_tools::ResolvedSource,
+    ) -> Result<SourcePresentResult, ToolError> {
         if let Some(existing) = self
             .presented
             .iter()
@@ -2359,11 +2416,16 @@ fn has_root_locator_context(answer: &str, start: usize, end: usize) -> bool {
     if is_bracketed_locator(answer, start, end) {
         return true;
     }
-    let before = answer[..start].trim_end_matches(|c: char| c.is_whitespace() || ":：=#-为是".contains(c));
+    let before =
+        answer[..start].trim_end_matches(|c: char| c.is_whitespace() || ":：=#-为是".contains(c));
     let after = answer[end..].trim_start();
     (before.ends_with('第') && after.starts_with(['章', '节', '節', '段']))
-        || ["位置", "章节", "章節", "段落", "编号", "編號"].iter().any(|prefix| before.ends_with(prefix))
-        || ["section", "chapter", "location", "locator"].iter().any(|prefix| before.to_ascii_lowercase().ends_with(prefix))
+        || ["位置", "章节", "章節", "段落", "编号", "編號"]
+            .iter()
+            .any(|prefix| before.ends_with(prefix))
+        || ["section", "chapter", "location", "locator"]
+            .iter()
+            .any(|prefix| before.to_ascii_lowercase().ends_with(prefix))
 }
 
 fn is_ordered_list_marker(answer: &str, start: usize, end: usize) -> bool {
@@ -2506,14 +2568,21 @@ fn normalize_bound_source_suffixes(raw: &str, bindings: &[SourceBinding]) -> Str
         let trimmed = line.trim_start();
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             let marker = trimmed.chars().next().unwrap();
-            fence = if fence == Some(marker) { None } else { Some(marker) };
+            fence = if fence == Some(marker) {
+                None
+            } else {
+                Some(marker)
+            };
             result.push_str(line);
             continue;
         }
         // Restrict to ordinary prose suffixes; code, quotations and indented blocks
         // are left intact. Ambiguous placements remain the Agent's responsibility.
-        if fence.is_some() || trimmed.starts_with('>') || line.starts_with("    ")
-            || line.contains(['`', '“', '”', '‘', '’', '"']) {
+        if fence.is_some()
+            || trimmed.starts_with('>')
+            || line.starts_with("    ")
+            || line.contains(['`', '“', '”', '‘', '’', '"'])
+        {
             result.push_str(line);
             continue;
         }
@@ -2522,18 +2591,25 @@ fn normalize_bound_source_suffixes(raw: &str, bindings: &[SourceBinding]) -> Str
             for (open, close) in [("[[", "]]"), ("[", "]"), ("（", "）"), ("(", ")")] {
                 let marker = format!("{open}{}{close}", binding.source_ref_id);
                 let mut from = 0;
-                while let Some(index) = normalized[from..].find(&marker).map(|offset| from + offset) {
+                while let Some(index) = normalized[from..].find(&marker).map(|offset| from + offset)
+                {
                     let end = index + marker.len();
                     let prefix = &normalized[..index];
                     let suffix = normalized[end..].trim_start();
                     let has_claim = !prefix.trim().is_empty() || !result.trim().is_empty();
-                    let is_suffix = suffix.is_empty() || suffix.starts_with(['。', '，', '；', '：', '.', ',', ';', ':', '!', '！', '?', '？'])
-                        || suffix.starts_with("[[source") || suffix.starts_with("[source_ref_");
+                    let is_suffix = suffix.is_empty()
+                        || suffix.starts_with([
+                            '。', '，', '；', '：', '.', ',', ';', ':', '!', '！', '?', '？',
+                        ])
+                        || suffix.starts_with("[[source")
+                        || suffix.starts_with("[source_ref_");
                     if has_claim && is_suffix && !prefix.ends_with(['[', ']', '\\']) {
                         let standard = format!("[[source:{}]]", binding.source_ref_id);
                         normalized.replace_range(index..end, &standard);
                         from = index + standard.len();
-                    } else { from = end; }
+                    } else {
+                        from = end;
+                    }
                 }
             }
         }
@@ -2542,24 +2618,54 @@ fn normalize_bound_source_suffixes(raw: &str, bindings: &[SourceBinding]) -> Str
     result
 }
 
-pub(crate) fn compile_answer_preview(raw: &str, bindings: &[SourceBinding], provenance: &AnswerProvenanceLedger) -> Option<AgentAnswerView> {
-    compile_agent_answer(raw, bindings, provenance).ok().map(|answer| answer.view)
+pub(crate) fn compile_answer_preview(
+    raw: &str,
+    bindings: &[SourceBinding],
+    provenance: &AnswerProvenanceLedger,
+) -> Option<AgentAnswerView> {
+    compile_agent_answer(raw, bindings, provenance)
+        .ok()
+        .map(|answer| answer.view)
 }
 
 /// Public presentation semantics use the same compiler as ordinary answers.
 /// HTML and scripts are private assets, never Markdown input to this compiler.
-pub fn compile_presentation_text(raw: &str, bindings: &[SourceBinding], messages: &[Message]) -> Result<AgentAnswerView, Vec<AnswerDeliveryIssue>> {
+pub fn compile_presentation_text(
+    raw: &str,
+    bindings: &[SourceBinding],
+    messages: &[Message],
+) -> Result<AgentAnswerView, Vec<AnswerDeliveryIssue>> {
     let mut provenance = AnswerProvenanceLedger::from_messages(messages);
     for binding in bindings {
-        provenance.observe_public_text(&binding.preview_snapshot, AnswerProvenanceChannel::SelectionEvidence);
-        for lid in [&binding.evidence_range.start_lid, &binding.evidence_range.end_lid] {
+        provenance.observe_public_text(
+            &binding.preview_snapshot,
+            AnswerProvenanceChannel::SelectionEvidence,
+        );
+        for lid in [
+            &binding.evidence_range.start_lid,
+            &binding.evidence_range.end_lid,
+        ] {
             provenance.observe_internal_locator(lid, AnswerProvenanceChannel::SelectionLocator);
         }
     }
-    compile_agent_answer(raw, bindings, &provenance).map(|answer| answer.view).map_err(|error| error.issues)
+    compile_agent_answer(raw, bindings, &provenance)
+        .map(|answer| answer.view)
+        .map_err(|error| error.issues)
 }
-fn answer_projector(adapter: &dyn ModelAdapter, structured: bool, bindings: &[SourceBinding], provenance: &AnswerProvenanceLedger, repair: bool) -> crate::answer_stream::AnswerProjector {
-    crate::answer_stream::AnswerProjector::new(adapter.run_events().unwrap_or_default(), structured || adapter.stream_text_is_structured(), bindings, provenance, repair)
+fn answer_projector(
+    adapter: &dyn ModelAdapter,
+    structured: bool,
+    bindings: &[SourceBinding],
+    provenance: &AnswerProvenanceLedger,
+    repair: bool,
+) -> crate::answer_stream::AnswerProjector {
+    crate::answer_stream::AnswerProjector::new(
+        adapter.run_events().unwrap_or_default(),
+        structured || adapter.stream_text_is_structured(),
+        bindings,
+        provenance,
+        repair,
+    )
 }
 
 fn compile_agent_answer(
@@ -2826,7 +2932,12 @@ fn deliver_agent_answer(
             let _purpose = crate::run_events::purpose(adapter, "repair");
             let mut projector = answer_projector(adapter, false, bindings, provenance, true);
             let repaired = adapter.chat_observed(&repair_plan, &mut projector);
-            if repaired.as_ref().map_or(true, |turn| !turn.tool_calls.is_empty()) { projector.discard(); }
+            if repaired
+                .as_ref()
+                .map_or(true, |turn| !turn.tool_calls.is_empty())
+            {
+                projector.discard();
+            }
             let extra_tokens = repaired
                 .as_ref()
                 .ok()
@@ -3174,6 +3285,12 @@ pub fn tool_specs() -> Vec<ToolSpec> {
     resident_tool_registry().visible_specs()
 }
 
+/// Returns whether a name belongs to the Resident registry without exposing the registry itself.
+/// Observation exporters use this to replace rejected/model-invented names with `unknown_tool`.
+pub fn is_registered_resident_tool(name: &str) -> bool {
+    resident_tool_registry().registration(name).is_some()
+}
+
 fn classify_paper_minimap_feedback(input: &str) -> Option<&'static str> {
     let text = input.to_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|needle| text.contains(needle));
@@ -3484,10 +3601,12 @@ fn dispatch_resident_book_tool(
                     Ok(projection) => to_json(&projection),
                     Err(error) => to_json(&error),
                 }
-            } else { match book.structure(input.at.as_deref()) {
-                Ok(projection) => to_json(&projection),
-                Err(error) => to_json(&error),
-            } }
+            } else {
+                match book.structure(input.at.as_deref()) {
+                    Ok(projection) => to_json(&projection),
+                    Err(error) => to_json(&error),
+                }
+            }
         }
         (BookToolId::GuidePath, BookToolInput::At(input)) => {
             match book.guide_path(input.at.as_deref()) {
@@ -3522,12 +3641,19 @@ fn dispatch_resident_book_tool(
 /// 视口变更(goto/scroll)不在此产 effect:由 `run` 按回合首尾 anchor 合并成单条 `Goto`(事务性 undo)。
 #[allow(clippy::too_many_arguments)]
 fn exact_highlight_range(text: &str, quote: &str) -> Option<(u32, u32)> {
-    if quote.is_empty() { return None; }
+    if quote.is_empty() {
+        return None;
+    }
     let text: Vec<u16> = text.encode_utf16().collect();
     let quote: Vec<u16> = quote.encode_utf16().collect();
-    let mut matches = text.windows(quote.len()).enumerate().filter(|(_, window)| *window == quote.as_slice());
+    let mut matches = text
+        .windows(quote.len())
+        .enumerate()
+        .filter(|(_, window)| *window == quote.as_slice());
     let (start, _) = matches.next()?;
-    if matches.next().is_some() { return None; }
+    if matches.next().is_some() {
+        return None;
+    }
     Some((start as u32, (start + quote.len()) as u32))
 }
 
@@ -3779,7 +3905,9 @@ fn dispatch_state_tool(
                     return (err_json("INVALID_RANGE", "validation", "highlight quote must match exactly once in the selected LID; locate a unique original quote"), None);
                 };
                 Some(range)
-            } else { None };
+            } else {
+                None
+            };
             match reader.highlight(book, store, lid, range, None, "session", now) {
                 Ok(e) => {
                     let eff = AgentEffect::Highlight {
@@ -4105,7 +4233,8 @@ fn canonical_tool_arguments(arguments: &str) -> String {
 fn trace_tool_arguments(tool: &str, arguments: &str) -> String {
     if tool == "presentation.author" {
         let v: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
-        return serde_json::json!({"operation":v["operation"],"candidate_id":v["candidate_id"]}).to_string();
+        return serde_json::json!({"operation":v["operation"],"candidate_id":v["candidate_id"]})
+            .to_string();
     }
     if tool != "tool.search" {
         return arguments.to_string();
@@ -4177,7 +4306,10 @@ impl ProgressPhaseGuard {
     }
 
     fn observe_error(&mut self, result: &str) {
-        if matches!(tool_result_error_code(result).as_deref(), Some("LID_NOT_FOUND" | "LID_PROVENANCE_REQUIRED" | "LID_RECOVERY_REQUIRED")) {
+        if matches!(
+            tool_result_error_code(result).as_deref(),
+            Some("LID_NOT_FOUND" | "LID_PROVENANCE_REQUIRED" | "LID_RECOVERY_REQUIRED")
+        ) {
             self.recovery_pending = true;
         }
     }
@@ -4403,9 +4535,18 @@ pub fn prepare_history_compaction(
 }
 
 /// 回合收尾:视口若较回合前 anchor 变了,合并成单条 `Goto` effect(事务性 undo `[ADR-0030]`)。
-pub fn run_effects(mut effects: Vec<AgentEffect>, navigation: &Option<(String, String)>) -> Vec<AgentEffect> {
-    if let Some((before, after)) = navigation.as_ref().filter(|(before, after)| before != after) {
-        effects.push(AgentEffect::Goto { before_anchor: before.clone(), after_anchor: after.clone() });
+pub fn run_effects(
+    mut effects: Vec<AgentEffect>,
+    navigation: &Option<(String, String)>,
+) -> Vec<AgentEffect> {
+    if let Some((before, after)) = navigation
+        .as_ref()
+        .filter(|(before, after)| before != after)
+    {
+        effects.push(AgentEffect::Goto {
+            before_anchor: before.clone(),
+            after_anchor: after.clone(),
+        });
     }
     effects
 }
@@ -4519,14 +4660,18 @@ fn build_sample_request(
         .collect::<Vec<_>>();
     let instruction_modules = if book.experimental_read_access().is_some() {
         crate::experiment::policy_modules(&visible_tools)
-    } else { policy_modules_for_tools(&visible_tools) };
+    } else {
+        policy_modules_for_tools(&visible_tools)
+    };
     let mut request_plan = AgentRequestPlan::for_agent_turn_with_modules(
         runtime_profile.clone(),
         &request_messages,
         &visible_tools,
         &instruction_modules,
     );
-    if book.experimental_read_access().is_some() { request_plan.output_token_limit = Some(8_000); }
+    if book.experimental_read_access().is_some() {
+        request_plan.output_token_limit = Some(8_000);
+    }
     Ok((tool_exposure_plan, request_plan))
 }
 
@@ -4792,6 +4937,7 @@ fn profile_usage_trace(
 
 const VERIFIED_SELECTION_EVIDENCE_CALL_LIMIT: usize = 2;
 const VERIFIED_SELECTION_PROTOCOL_RETRY_LIMIT: u8 = 2;
+const TOOL_LOOP_BUDGET_CONTEXT_FRAGMENT_KEY: &str = "agent.tool_loop_budget";
 const FINALIZATION_CONTEXT_FRAGMENT_KEY: &str = "agent.finalization_sampling";
 const FINALIZATION_INSTRUCTIONS: &str = "finalization_sampling.v1\n\
 The model-tool loop budget is exhausted. Produce the final answer now from the current conversation and already observed evidence. \
@@ -4812,6 +4958,24 @@ const VERIFIED_SELECTION_FOLLOWUP_EXCLUDED_TOOLS: &[&str] = &[
     "book.synthesize",
     "book.concept",
 ];
+
+fn tool_loop_budget_instructions(turns_completed: usize, max_turns: usize) -> String {
+    let current_sampling = turns_completed.saturating_add(1);
+    let remaining_after = max_turns.saturating_sub(current_sampling);
+    let mut instructions = format!(
+        "tool_loop_budget.v1\n\
+Tool-loop sampling {current_sampling} of {max_turns}. This sampling counts toward the limit. \
+Remaining tool-loop samplings after this one: {remaining_after}.\n\
+The limit is a ceiling, not a target. If the current verified evidence answers the user's original request, answer now without tools."
+    );
+    if remaining_after <= 1 {
+        instructions.push_str(
+            "\nConvergence required: stay on the user's original request. Use tools only for a concrete blocking evidence or required source/action gap; do not broaden into adjacent topics. Prefer the final answer now when existing verified evidence is sufficient.",
+        );
+    }
+    instructions
+}
+
 const SELECTION_ANSWER_SYNTHESIS_PROMPT: &str = "selection_answer_synthesis.v1\n\
 You produce the final answer for a server-validated local book selection after evidence acquisition has closed. \
 Return exactly one JSON object with one string field: {\"answer\":\"...\"}. \
@@ -5131,15 +5295,36 @@ pub fn run_with_turn_resources_and_checkpoint_sink(
     now: &str,
     cfg: OuterConfig,
 ) -> Result<OuterOutcome, ToolError> {
-    let mut context = RunContext::new(std::mem::take(messages), cfg, adapter.model_runtime_profile());
-    let result = run_context(book, &mut BorrowedResidentState { store, reader }, adapter,
-        &mut context, profile_snapshot, resources, active_checkpoint, checkpoint_sink, question, now);
+    let mut context = RunContext::new(
+        std::mem::take(messages),
+        cfg,
+        adapter.model_runtime_profile(),
+    );
+    let result = run_context(
+        book,
+        &mut BorrowedResidentState { store, reader },
+        adapter,
+        &mut context,
+        profile_snapshot,
+        resources,
+        active_checkpoint,
+        checkpoint_sink,
+        question,
+        now,
+    );
     *messages = context.messages;
     result
 }
 
-fn append_presentations(view: &mut AgentAnswerView, references: &[crate::presentation::PresentationRef]) {
-    view.parts.extend(references.iter().map(|r| AgentAnswerPart::Presentation { presentation_id:r.presentation_id.clone(), revision:r.revision }));
+fn append_presentations(
+    view: &mut AgentAnswerView,
+    references: &[crate::presentation::PresentationRef],
+) {
+    view.parts
+        .extend(references.iter().map(|r| AgentAnswerPart::Presentation {
+            presentation_id: r.presentation_id.clone(),
+            revision: r.revision,
+        }));
 }
 
 pub fn run_context(
@@ -5155,8 +5340,24 @@ pub fn run_context(
     now: &str,
 ) -> Result<OuterOutcome, ToolError> {
     if adapter.run_events().is_none() {
-        let observed = crate::run_events::ObservedAdapter { inner: adapter, events: context.events.clone(), cancellation: context.cancellation.clone() };
-        return run_context(book, state, &observed, context, profile_snapshot, resources, active_checkpoint, checkpoint_sink, question, now);
+        let observed = crate::run_events::ObservedAdapter {
+            inner: adapter,
+            events: context.events.clone(),
+            cancellation: context.cancellation.clone(),
+            runtime_profile: context.runtime_profile.clone(),
+        };
+        return run_context(
+            book,
+            state,
+            &observed,
+            context,
+            profile_snapshot,
+            resources,
+            active_checkpoint,
+            checkpoint_sink,
+            question,
+            now,
+        );
     }
     let cfg = context.config;
     let runtime_profile = context.runtime_profile.clone();
@@ -5340,7 +5541,20 @@ pub fn run_context(
     loop {
         context.cancellation.check()?;
         let mut sampling_context_fragments = context_fragments.clone();
-        let delivery_grace_excluded_tools = if let Some(candidate_id) = presentation_delivery_grace.as_ref() {
+        if presentation_delivery_grace.is_none() {
+            sampling_context_fragments
+                .upsert(ContextFragment::new(
+                    TOOL_LOOP_BUDGET_CONTEXT_FRAGMENT_KEY,
+                    FragmentScope::Dynamic,
+                    Role::System,
+                    tool_loop_budget_instructions(turns, cfg.max_turns),
+                    FragmentSensitivity::Private,
+                ))
+                .map_err(context_fragment_error)?;
+        }
+        let delivery_grace_excluded_tools = if let Some(candidate_id) =
+            presentation_delivery_grace.as_ref()
+        {
             sampling_context_fragments.upsert(ContextFragment::new(
                 PRESENTATION_DELIVERY_GRACE_FRAGMENT_KEY,
                 FragmentScope::Dynamic,
@@ -5348,11 +5562,15 @@ pub fn run_context(
                 format!("presentation_delivery_grace.v1\nThe tool-loop budget is exhausted after a successful preview. Call presentation.author exactly once with operation=deliver and candidate_id={candidate_id}. Do not read, write, preview, call another tool, or answer in prose yet."),
                 FragmentSensitivity::Private,
             )).map_err(context_fragment_error)?;
-            tool_registry.registrations().iter()
+            tool_registry
+                .registrations()
+                .iter()
                 .map(|registration| registration.spec.name.as_str())
                 .filter(|name| *name != "presentation.author")
                 .collect::<Vec<_>>()
-        } else { Vec::new() };
+        } else {
+            Vec::new()
+        };
         let sampled_excluded_tools: &[&str] = if !delivery_grace_excluded_tools.is_empty() {
             &delivery_grace_excluded_tools
         } else if !verified_selection_turn {
@@ -5432,7 +5650,11 @@ pub fn run_context(
             }
         }
         if let Some(candidate_id) = presentation_delivery_grace.as_ref() {
-            if let Some(tool) = request_plan.tools.iter_mut().find(|tool| tool.name == "presentation.author") {
+            if let Some(tool) = request_plan
+                .tools
+                .iter_mut()
+                .find(|tool| tool.name == "presentation.author")
+            {
                 tool.parameters = serde_json::json!({"type":"object","properties":{
                     "operation":{"type":"string","enum":["deliver"]},
                     "candidate_id":{"type":"string","enum":[candidate_id]}
@@ -5457,8 +5679,21 @@ pub fn run_context(
         let provider_messages = request_plan.ordered_messages();
         let request_audit_index =
             request_audit.begin_request(&provider_messages, &request_plan.tools, spent);
-        let sampling_scope = crate::run_events::purpose(adapter, if selection_completion.is_some() { "selection" } else { "outer" });
-        let mut projector = answer_projector(adapter, selection_completion.is_some(), &context.evidence_ledger.bindings(), &context.answer_provenance, false);
+        let sampling_scope = crate::run_events::purpose(
+            adapter,
+            if selection_completion.is_some() {
+                "selection"
+            } else {
+                "outer"
+            },
+        );
+        let mut projector = answer_projector(
+            adapter,
+            selection_completion.is_some(),
+            &context.evidence_ledger.bindings(),
+            &context.answer_provenance,
+            false,
+        );
         let turn_result = match selection_completion {
             Some(completion) => adapter
                 .complete_structured_observed(completion, &mut projector)
@@ -5470,7 +5705,12 @@ pub fn run_context(
                 }),
             None => adapter.chat_observed(&request_plan, &mut projector),
         };
-        if turn_result.as_ref().map_or(true, |turn| !turn.tool_calls.is_empty()) { projector.discard(); }
+        if turn_result
+            .as_ref()
+            .map_or(true, |turn| !turn.tool_calls.is_empty())
+        {
+            projector.discard();
+        }
         drop(sampling_scope);
         let mut turn: AssistantTurn = match turn_result {
             Ok(turn) => turn,
@@ -5506,7 +5746,9 @@ pub fn run_context(
         };
         context.cancellation.check()?;
         if !request_plan.preview_images.is_empty() {
-            if let Some(id) = context.pending_preview.take() { context.inspected_presentations.insert(id); }
+            if let Some(id) = context.pending_preview.take() {
+                context.inspected_presentations.insert(id);
+            }
         }
         if let Some(candidate_id) = presentation_delivery_grace.take() {
             let valid_delivery = turn.tool_calls.len() == 1
@@ -5545,8 +5787,8 @@ pub fn run_context(
             });
         }
         let provider_reported_tokens = turn.usage_total_tokens;
-        let billed_tokens_charged =
-            provider_reported_tokens.unwrap_or_else(|| messages_estimate(&provider_messages) + image_tokens);
+        let billed_tokens_charged = provider_reported_tokens
+            .unwrap_or_else(|| messages_estimate(&provider_messages) + image_tokens);
         spent += billed_tokens_charged;
         request_audit.finish_request(
             request_audit_index,
@@ -5632,7 +5874,9 @@ pub fn run_context(
                 .map(|delivery| delivery.compiled.answer.clone());
             let answer_view = delivery.as_ref().map(|delivery| {
                 let mut view = delivery.compiled.view.clone();
-                if !delivery.incomplete { append_presentations(&mut view, &context.delivered_presentations); }
+                if !delivery.incomplete {
+                    append_presentations(&mut view, &context.delivered_presentations);
+                }
                 view
             });
             let delivery_diagnostics = delivery
@@ -5740,31 +5984,54 @@ pub fn run_context(
                 && tool_call_progress.is_repeat(&tc.name, &tc.arguments, &progress_before);
             let text_authorization = matches!(handler, Some(ToolHandlerId::Book(BookToolId::Text)))
                 .then(|| authorize_book_text(&tc.arguments, &locator_batch_snapshot));
-            let synthesize_authorization = matches!(handler, Some(ToolHandlerId::Book(BookToolId::Synthesize)))
-                .then(|| authorize_book_synthesize(&tc.arguments, context.evidence_ledger.evidence_state(), &evidence_plan_batch_snapshot, &locator_batch_snapshot));
+            let synthesize_authorization =
+                matches!(handler, Some(ToolHandlerId::Book(BookToolId::Synthesize))).then(|| {
+                    authorize_book_synthesize(
+                        &tc.arguments,
+                        context.evidence_ledger.evidence_state(),
+                        &evidence_plan_batch_snapshot,
+                        &locator_batch_snapshot,
+                    )
+                });
             let recovery_call = recovery_batch
                 && match handler {
                     Some(ToolHandlerId::Book(
                         BookToolId::SearchText | BookToolId::Structure | BookToolId::Context,
                     )) => true,
-                    Some(ToolHandlerId::Book(BookToolId::Text)) => {
-                        text_authorization.as_ref().is_some_and(|result| result.is_ok())
-                    }
+                    Some(ToolHandlerId::Book(BookToolId::Text)) => text_authorization
+                        .as_ref()
+                        .is_some_and(|result| result.is_ok()),
                     Some(ToolHandlerId::ToolSearch) => true,
                     _ => false,
                 };
             let phase_blocked = phase_stalled && !recovery_call;
             let blocked_without_progress = phase_blocked || repeated_without_progress;
-            let schema_valid = registered.is_some_and(|r| r.validate_arguments(&tc.arguments).is_ok());
-            let intent_allowed = !registered.is_some_and(|r| r.routing_card.effects == crate::tool_registry::ToolEffect::ReaderWrite
-                && !context.tool_exposure_state.authorizes_reader_action(r.handler));
-            let source_preparation = (matches!(handler, Some(ToolHandlerId::SourcePresent)) && schema_valid && !blocked_without_progress)
+            let schema_valid =
+                registered.is_some_and(|r| r.validate_arguments(&tc.arguments).is_ok());
+            let intent_allowed = !registered.is_some_and(|r| {
+                r.routing_card.effects == crate::tool_registry::ToolEffect::ReaderWrite
+                    && !context
+                        .tool_exposure_state
+                        .authorizes_reader_action(r.handler)
+            });
+            let source_preparation = (matches!(handler, Some(ToolHandlerId::SourcePresent))
+                && schema_valid
+                && !blocked_without_progress)
                 .then(|| context.evidence_ledger.prepare_present(book, &tc.arguments));
             let provenance_allowed = text_authorization.as_ref().is_none_or(|r| r.is_ok())
                 && synthesize_authorization.as_ref().is_none_or(|r| r.is_ok())
                 && source_preparation.as_ref().is_none_or(|r| r.is_ok());
-            let executed = handler.is_some() && schema_valid && intent_allowed && provenance_allowed && !blocked_without_progress;
-            let activity = context.events.begin("tool", &tc.name, registered.map(|r| r.activity_label()).unwrap_or("未知工具"), executed);
+            let executed = handler.is_some()
+                && schema_valid
+                && intent_allowed
+                && provenance_allowed
+                && !blocked_without_progress;
+            let activity = context.events.begin(
+                "tool",
+                &tc.name,
+                registered.map(|r| r.activity_label()).unwrap_or("未知工具"),
+                executed,
+            );
             let activity_scope = context.events.scope(Some(activity.step_id), "outer");
             let (result, effect, query_audit) = match handler {
                 None if registered.is_some() => (
@@ -5972,12 +6239,26 @@ pub fn run_context(
                     (result, effect, None)
                 }
             };
-            if let Some(ref effect) = effect { context.events.effect_created(activity.step_id, effect); }
+            if let Some(ref effect) = effect {
+                context.events.effect_created(activity.step_id, effect);
+            }
             drop(activity_scope);
-            let (mut activity_status, activity_error, activity_count) = crate::run_events::tool_result(&result);
-            if !executed { activity_status = crate::run_events::ActivityStatus::Rejected; }
-            if context.cancellation.is_cancelled() { activity_status = crate::run_events::ActivityStatus::Cancelled; }
-            context.events.finish(activity, activity_status, None, activity_error, activity_count);
+            let (mut activity_status, activity_error, activity_count) =
+                crate::run_events::tool_result(&result);
+            if !executed {
+                activity_status = crate::run_events::ActivityStatus::Rejected;
+            }
+            if context.cancellation.is_cancelled() {
+                activity_status = crate::run_events::ActivityStatus::Cancelled;
+            }
+            let activity_step_id = activity.step_id;
+            context.events.finish(
+                activity,
+                activity_status,
+                None,
+                activity_error,
+                activity_count,
+            );
             if handler.is_some() && tool_result_error_code(&result).is_none() {
                 if let Some(registration) = registered {
                     capability_batch_observations.extend(
@@ -6042,6 +6323,9 @@ pub fn run_context(
                 .into_iter()
                 .filter(|evidence| !evidence_before.contains(evidence))
                 .collect::<Vec<_>>();
+            context
+                .events
+                .evidence_accepted(activity_step_id, &newly_observed_evidence);
             locator_batch_observations.observe_tool_result(&tc.name, &model_body, book);
             locator_batch_observations.observe_verified_evidence(&newly_observed_evidence, book);
             evidence_plan_batch_observations.observe_tool_result(&tc.name, &model_body);
@@ -6063,7 +6347,8 @@ pub fn run_context(
             let is_artifact_call = registered.is_some_and(|registration| {
                 matches!(registration.handler, ToolHandlerId::Artifact(_))
             });
-            let persisted_tool_content = (is_artifact_call || tc.name == "presentation.author").then(|| to_json(&receipt));
+            let persisted_tool_content =
+                (is_artifact_call || tc.name == "presentation.author").then(|| to_json(&receipt));
             context
                 .active_tool_results
                 .insert(tc.id.clone(), projection.into_envelope(receipt));
@@ -6249,9 +6534,20 @@ pub fn run_context(
             let provider_messages = finalization_plan.ordered_messages();
             let request_audit_index =
                 request_audit.begin_request(&provider_messages, &finalization_plan.tools, spent);
-            let mut projector = answer_projector(adapter, false, &context.evidence_ledger.bindings(), &context.answer_provenance, false);
+            let mut projector = answer_projector(
+                adapter,
+                false,
+                &context.evidence_ledger.bindings(),
+                &context.answer_provenance,
+                false,
+            );
             let finalization_result = adapter.chat_observed(&finalization_plan, &mut projector);
-            if finalization_result.as_ref().map_or(true, |turn| !turn.tool_calls.is_empty()) { projector.discard(); }
+            if finalization_result
+                .as_ref()
+                .map_or(true, |turn| !turn.tool_calls.is_empty())
+            {
+                projector.discard();
+            }
             let provider_reported_tokens = finalization_result
                 .as_ref()
                 .ok()
@@ -6311,7 +6607,9 @@ pub fn run_context(
             spent += delivery.extra_tokens;
             let answer = delivery.compiled.answer.clone();
             let mut answer_view = delivery.compiled.view.clone();
-            if !delivery.incomplete { append_presentations(&mut answer_view, &context.delivered_presentations); }
+            if !delivery.incomplete {
+                append_presentations(&mut answer_view, &context.delivered_presentations);
+            }
             let source_bindings = delivery.compiled.bindings;
             messages.push(Message {
                 role: Role::Assistant,
@@ -6398,48 +6696,124 @@ mod tests {
     #[test]
     fn presentation_author_read_continuations_are_progress() {
         use crate::presentation_author::{AuthorRequest, AuthorResult};
-        struct Port { store: MemoryStore, reader: Reader }
+        struct Port {
+            store: MemoryStore,
+            reader: Reader,
+        }
         impl ResidentStatePort for Port {
-            fn with_state<R>(&mut self, f: impl FnOnce(&mut MemoryStore, &mut Reader) -> R) -> R { f(&mut self.store, &mut self.reader) }
-            fn author_presentation(&mut self, req: AuthorRequest, _: &[SourceBinding], _: &[Message], _: &crate::run_context::CancellationToken) -> Result<AuthorResult, ToolError> {
-                let AuthorRequest::Read { reference, offset, .. } = req else { unreachable!() };
-                Ok(AuthorResult { body:serde_json::json!({"status":"version_read","reference":reference,"file":"index.html","offset":offset,"text":"code chunk","next_offset":if offset < 8000 { Some(offset + 4000) } else { None }}), images:vec![], previewed_candidate:None, delivered:None })
+            fn with_state<R>(&mut self, f: impl FnOnce(&mut MemoryStore, &mut Reader) -> R) -> R {
+                f(&mut self.store, &mut self.reader)
+            }
+            fn author_presentation(
+                &mut self,
+                req: AuthorRequest,
+                _: &[SourceBinding],
+                _: &[Message],
+                _: &crate::run_context::CancellationToken,
+            ) -> Result<AuthorResult, ToolError> {
+                let AuthorRequest::Read {
+                    reference, offset, ..
+                } = req
+                else {
+                    unreachable!()
+                };
+                Ok(AuthorResult {
+                    body: serde_json::json!({"status":"version_read","reference":reference,"file":"index.html","offset":offset,"text":"code chunk","next_offset":if offset < 8000 { Some(offset + 4000) } else { None }}),
+                    images: vec![],
+                    previewed_candidate: None,
+                    delivered: None,
+                })
             }
         }
         let b = book();
-        let mut port = Port { store:MemoryStore::open(tmp("rp7-read-continuations")).unwrap(), reader:Reader::new(&b,1) };
-        let mut turns = vec![turn_calls(vec![call("discover","tool.search",r#"{"task":"edit HTML","required_capabilities":["presentation_authoring"],"scope":"passage","operation":"explain","effect_mode":"read_only","max_results":1}"#)])];
+        let mut port = Port {
+            store: MemoryStore::open(tmp("rp7-read-continuations")).unwrap(),
+            reader: Reader::new(&b, 1),
+        };
+        let mut turns = vec![turn_calls(vec![call(
+            "discover",
+            "tool.search",
+            r#"{"task":"edit HTML","required_capabilities":["presentation_authoring"],"scope":"passage","operation":"explain","effect_mode":"read_only","max_results":1}"#,
+        )])];
         for offset in [0, 4000, 8000] {
             turns.push(turn_calls(vec![call(&format!("read-{offset}"), "presentation.author", &serde_json::json!({"operation":"read","reference":{"presentation_id":"p1","revision":1},"offset":offset}).to_string())]));
         }
         turns.push(turn_final("已读取完整代码。"));
         let adapter = RequestPlanRecordingAdapter::new(turns, vec![]);
-        let snapshot = default_profile_snapshot(&b,&port.store,"t0");
-        let mut context = RunContext::new(new_session(),OuterConfig::default(),adapter.model_runtime_profile());
-        let outcome = run_context(&b,&mut port,&adapter,&mut context,&snapshot,&ResidentTurnResources::default(),None,&mut EphemeralCompactionCheckpointSink::default(),"读取旧版完整代码","t0").unwrap();
-        assert!(!outcome.incomplete, "different code chunks must not trigger no-progress finalization");
+        let snapshot = default_profile_snapshot(&b, &port.store, "t0");
+        let mut context = RunContext::new(
+            new_session(),
+            OuterConfig::default(),
+            adapter.model_runtime_profile(),
+        );
+        let outcome = run_context(
+            &b,
+            &mut port,
+            &adapter,
+            &mut context,
+            &snapshot,
+            &ResidentTurnResources::default(),
+            None,
+            &mut EphemeralCompactionCheckpointSink::default(),
+            "读取旧版完整代码",
+            "t0",
+        )
+        .unwrap();
+        assert!(
+            !outcome.incomplete,
+            "different code chunks must not trigger no-progress finalization"
+        );
     }
 
     #[test]
     fn presentation_author_failed_observation_allows_recheck_then_repair() {
         use crate::presentation_author::{AuthorRequest, AuthorResult, PreviewImage};
-        struct Port { store: MemoryStore, reader: Reader, writes: usize }
+        struct Port {
+            store: MemoryStore,
+            reader: Reader,
+            writes: usize,
+        }
         impl ResidentStatePort for Port {
-            fn with_state<R>(&mut self, f: impl FnOnce(&mut MemoryStore, &mut Reader) -> R) -> R { f(&mut self.store, &mut self.reader) }
-            fn author_presentation(&mut self, req: AuthorRequest, _: &[SourceBinding], _: &[Message], _: &crate::run_context::CancellationToken) -> Result<AuthorResult, ToolError> {
-                let mut result = AuthorResult { body: serde_json::Value::Null, images: vec![], previewed_candidate: None, delivered: None };
+            fn with_state<R>(&mut self, f: impl FnOnce(&mut MemoryStore, &mut Reader) -> R) -> R {
+                f(&mut self.store, &mut self.reader)
+            }
+            fn author_presentation(
+                &mut self,
+                req: AuthorRequest,
+                _: &[SourceBinding],
+                _: &[Message],
+                _: &crate::run_context::CancellationToken,
+            ) -> Result<AuthorResult, ToolError> {
+                let mut result = AuthorResult {
+                    body: serde_json::Value::Null,
+                    images: vec![],
+                    previewed_candidate: None,
+                    delivered: None,
+                };
                 match req {
-                    AuthorRequest::Write { .. } => { self.writes += 1; result.body = serde_json::json!({"status":"candidate_saved","candidate_id":format!("c{}",self.writes)}); }
+                    AuthorRequest::Write { .. } => {
+                        self.writes += 1;
+                        result.body = serde_json::json!({"status":"candidate_saved","candidate_id":format!("c{}",self.writes)});
+                    }
                     AuthorRequest::Preview { candidate_id, .. } => {
                         result.body = if candidate_id == "c1" {
                             serde_json::json!({"status":"preview_failed","candidate_id":candidate_id,"error_code":"PRESENTATION_PREVIEW_FAILED","errors":["script error"]})
-                        } else { serde_json::json!({"status":"preview_ready_for_inspection","candidate_id":candidate_id}) };
+                        } else {
+                            serde_json::json!({"status":"preview_ready_for_inspection","candidate_id":candidate_id})
+                        };
                         result.previewed_candidate = Some(candidate_id);
-                        result.images.push(PreviewImage { caption:"orchestration test observation".into(), png_base64:"png".into() });
+                        result.images.push(PreviewImage {
+                            caption: "orchestration test observation".into(),
+                            png_base64: "png".into(),
+                        });
                     }
                     AuthorRequest::Deliver { .. } => {
-                        let reference = crate::presentation::PresentationRef { presentation_id:"p1".into(), revision:1 };
-                        result.body = serde_json::json!({"status":"version_saved","reference":reference});
+                        let reference = crate::presentation::PresentationRef {
+                            presentation_id: "p1".into(),
+                            revision: 1,
+                        };
+                        result.body =
+                            serde_json::json!({"status":"version_saved","reference":reference});
                         result.delivered = Some(reference);
                     }
                     AuthorRequest::Read { .. } => unreachable!(),
@@ -6448,98 +6822,323 @@ mod tests {
             }
         }
         let b = book();
-        let mut port = Port { store:MemoryStore::open(tmp("rp7-observation")).unwrap(), reader:Reader::new(&b,1), writes:0 };
-        let adapter = RequestPlanRecordingAdapter::new(vec![
-            turn_calls(vec![call("discover","tool.search",r#"{"task":"interactive HTML","required_capabilities":["presentation_authoring"],"scope":"passage","operation":"explain","effect_mode":"read_only","max_results":1}"#)]),
-            turn_calls(vec![call("write","presentation.author",r#"{"operation":"write","title":"example","html":"<h1>Example</h1>","readable_content":"Example"}"#)]),
-            turn_calls(vec![call("preview","presentation.author",r#"{"operation":"preview","candidate_id":"c1"}"#)]),
-            turn_calls(vec![call("recheck","presentation.author",r#"{"operation":"preview","candidate_id":"c1"}"#)]),
-            turn_calls(vec![call("repair","presentation.author",r#"{"operation":"write","title":"fixed","html":"<h1>Fixed</h1>","readable_content":"Fixed"}"#)]),
-            turn_calls(vec![call("preview-fixed","presentation.author",r#"{"operation":"preview","candidate_id":"c2"}"#)]),
-            turn_calls(vec![call("deliver","presentation.author",r#"{"operation":"deliver","candidate_id":"c2"}"#)]),
-            turn_final("已修正并交付。"),
-        ], vec![]);
-        let snapshot = default_profile_snapshot(&b,&port.store,"t0");
-        let mut context = RunContext::new(new_session(),OuterConfig::default(),adapter.model_runtime_profile());
-        let outcome = run_context(&b,&mut port,&adapter,&mut context,&snapshot,&ResidentTurnResources::default(),None,&mut EphemeralCompactionCheckpointSink::default(),"制作交互内容","t0").unwrap();
-        assert_eq!(port.writes, 2, "first failed observation must leave room for repair after one recheck");
-        assert!(outcome.answer_view.unwrap().parts.iter().any(|p| matches!(p, AgentAnswerPart::Presentation { .. })));
+        let mut port = Port {
+            store: MemoryStore::open(tmp("rp7-observation")).unwrap(),
+            reader: Reader::new(&b, 1),
+            writes: 0,
+        };
+        let adapter = RequestPlanRecordingAdapter::new(
+            vec![
+                turn_calls(vec![call(
+                    "discover",
+                    "tool.search",
+                    r#"{"task":"interactive HTML","required_capabilities":["presentation_authoring"],"scope":"passage","operation":"explain","effect_mode":"read_only","max_results":1}"#,
+                )]),
+                turn_calls(vec![call(
+                    "write",
+                    "presentation.author",
+                    r#"{"operation":"write","title":"example","html":"<h1>Example</h1>","readable_content":"Example"}"#,
+                )]),
+                turn_calls(vec![call(
+                    "preview",
+                    "presentation.author",
+                    r#"{"operation":"preview","candidate_id":"c1"}"#,
+                )]),
+                turn_calls(vec![call(
+                    "recheck",
+                    "presentation.author",
+                    r#"{"operation":"preview","candidate_id":"c1"}"#,
+                )]),
+                turn_calls(vec![call(
+                    "repair",
+                    "presentation.author",
+                    r#"{"operation":"write","title":"fixed","html":"<h1>Fixed</h1>","readable_content":"Fixed"}"#,
+                )]),
+                turn_calls(vec![call(
+                    "preview-fixed",
+                    "presentation.author",
+                    r#"{"operation":"preview","candidate_id":"c2"}"#,
+                )]),
+                turn_calls(vec![call(
+                    "deliver",
+                    "presentation.author",
+                    r#"{"operation":"deliver","candidate_id":"c2"}"#,
+                )]),
+                turn_final("已修正并交付。"),
+            ],
+            vec![],
+        );
+        let snapshot = default_profile_snapshot(&b, &port.store, "t0");
+        let mut context = RunContext::new(
+            new_session(),
+            OuterConfig::default(),
+            adapter.model_runtime_profile(),
+        );
+        let outcome = run_context(
+            &b,
+            &mut port,
+            &adapter,
+            &mut context,
+            &snapshot,
+            &ResidentTurnResources::default(),
+            None,
+            &mut EphemeralCompactionCheckpointSink::default(),
+            "制作交互内容",
+            "t0",
+        )
+        .unwrap();
+        assert_eq!(
+            port.writes, 2,
+            "first failed observation must leave room for repair after one recheck"
+        );
+        assert!(outcome
+            .answer_view
+            .unwrap()
+            .parts
+            .iter()
+            .any(|p| matches!(p, AgentAnswerPart::Presentation { .. })));
     }
 
     #[test]
     fn presentation_author_requires_next_sampling_and_attaches_saved_reference() {
         use crate::presentation_author::{AuthorRequest, AuthorResult, PreviewImage};
-        struct Port { store:MemoryStore, reader:Reader, delivered:usize }
+        struct Port {
+            store: MemoryStore,
+            reader: Reader,
+            delivered: usize,
+        }
         impl ResidentStatePort for Port {
-            fn with_state<R>(&mut self, f:impl FnOnce(&mut MemoryStore,&mut Reader)->R)->R { f(&mut self.store,&mut self.reader) }
-            fn author_presentation(&mut self, req:AuthorRequest, _: &[SourceBinding], _: &[Message], _: &crate::run_context::CancellationToken)->Result<AuthorResult,ToolError> {
-                let mut r=AuthorResult {body:serde_json::json!({"status":"candidate_saved","candidate_id":"c1"}),images:vec![],previewed_candidate:None,delivered:None};
+            fn with_state<R>(&mut self, f: impl FnOnce(&mut MemoryStore, &mut Reader) -> R) -> R {
+                f(&mut self.store, &mut self.reader)
+            }
+            fn author_presentation(
+                &mut self,
+                req: AuthorRequest,
+                _: &[SourceBinding],
+                _: &[Message],
+                _: &crate::run_context::CancellationToken,
+            ) -> Result<AuthorResult, ToolError> {
+                let mut r = AuthorResult {
+                    body: serde_json::json!({"status":"candidate_saved","candidate_id":"c1"}),
+                    images: vec![],
+                    previewed_candidate: None,
+                    delivered: None,
+                };
                 match req {
-                    AuthorRequest::Write {..} | AuthorRequest::Read {..} => {},
-                    AuthorRequest::Preview {candidate_id,..} => {r.body["status"]=serde_json::json!("preview_ready_for_inspection");r.previewed_candidate=Some(candidate_id);r.images.push(PreviewImage {caption:"real observation placeholder for orchestration test".into(),png_base64:"png".into()});},
-                    AuthorRequest::Deliver {..} => {self.delivered+=1;r.body["status"]=serde_json::json!("version_saved");r.delivered=Some(crate::presentation::PresentationRef {presentation_id:"p1".into(),revision:1});},
+                    AuthorRequest::Write { .. } | AuthorRequest::Read { .. } => {}
+                    AuthorRequest::Preview { candidate_id, .. } => {
+                        r.body["status"] = serde_json::json!("preview_ready_for_inspection");
+                        r.previewed_candidate = Some(candidate_id);
+                        r.images.push(PreviewImage {
+                            caption: "real observation placeholder for orchestration test".into(),
+                            png_base64: "png".into(),
+                        });
+                    }
+                    AuthorRequest::Deliver { .. } => {
+                        self.delivered += 1;
+                        r.body["status"] = serde_json::json!("version_saved");
+                        r.delivered = Some(crate::presentation::PresentationRef {
+                            presentation_id: "p1".into(),
+                            revision: 1,
+                        });
+                    }
                 }
                 Ok(r)
             }
         }
-        let b=book();
-        let mut port=Port {store:MemoryStore::open(tmp("rp4-runtime")).unwrap(),reader:Reader::new(&b,1),delivered:0};
-        let adapter=RequestPlanRecordingAdapter::new(vec![
-            turn_calls(vec![call("discover","tool.search",r#"{"task":"interactive HTML","required_capabilities":["presentation_authoring"],"scope":"passage","operation":"explain","effect_mode":"read_only","max_results":1}"#)]),
-            turn_calls(vec![call("write","presentation.author",r#"{"operation":"write","title":"example","html":"<h1>Example</h1>","readable_content":"Example"}"#)]),
-            turn_calls(vec![call("preview","presentation.author",r#"{"operation":"preview","candidate_id":"c1"}"#),call("early","presentation.author",r#"{"operation":"deliver","candidate_id":"c1"}"#)]),
-            turn_calls(vec![call("deliver","presentation.author",r#"{"operation":"deliver","candidate_id":"c1"}"#)]),
-            turn_final("交互内容已准备好。"),
-        ],vec![]);
-        let snapshot=default_profile_snapshot(&b,&port.store,"t0");
-        let mut context=RunContext::new(new_session(),OuterConfig::default(),adapter.model_runtime_profile());
-        let outcome=run_context(&b,&mut port,&adapter,&mut context,&snapshot,&ResidentTurnResources::default(),None,&mut EphemeralCompactionCheckpointSink::default(),"制作交互内容","t0").unwrap();
-        assert_eq!(port.delivered,1);
-        assert!(context.messages.iter().any(|m| m.content.as_deref().is_some_and(|t|t.contains("PRESENTATION_INSPECTION_REQUIRED"))));
+        let b = book();
+        let mut port = Port {
+            store: MemoryStore::open(tmp("rp4-runtime")).unwrap(),
+            reader: Reader::new(&b, 1),
+            delivered: 0,
+        };
+        let adapter = RequestPlanRecordingAdapter::new(
+            vec![
+                turn_calls(vec![call(
+                    "discover",
+                    "tool.search",
+                    r#"{"task":"interactive HTML","required_capabilities":["presentation_authoring"],"scope":"passage","operation":"explain","effect_mode":"read_only","max_results":1}"#,
+                )]),
+                turn_calls(vec![call(
+                    "write",
+                    "presentation.author",
+                    r#"{"operation":"write","title":"example","html":"<h1>Example</h1>","readable_content":"Example"}"#,
+                )]),
+                turn_calls(vec![
+                    call(
+                        "preview",
+                        "presentation.author",
+                        r#"{"operation":"preview","candidate_id":"c1"}"#,
+                    ),
+                    call(
+                        "early",
+                        "presentation.author",
+                        r#"{"operation":"deliver","candidate_id":"c1"}"#,
+                    ),
+                ]),
+                turn_calls(vec![call(
+                    "deliver",
+                    "presentation.author",
+                    r#"{"operation":"deliver","candidate_id":"c1"}"#,
+                )]),
+                turn_final("交互内容已准备好。"),
+            ],
+            vec![],
+        );
+        let snapshot = default_profile_snapshot(&b, &port.store, "t0");
+        let mut context = RunContext::new(
+            new_session(),
+            OuterConfig::default(),
+            adapter.model_runtime_profile(),
+        );
+        let outcome = run_context(
+            &b,
+            &mut port,
+            &adapter,
+            &mut context,
+            &snapshot,
+            &ResidentTurnResources::default(),
+            None,
+            &mut EphemeralCompactionCheckpointSink::default(),
+            "制作交互内容",
+            "t0",
+        )
+        .unwrap();
+        assert_eq!(port.delivered, 1);
+        assert!(context.messages.iter().any(|m| m
+            .content
+            .as_deref()
+            .is_some_and(|t| t.contains("PRESENTATION_INSPECTION_REQUIRED"))));
         assert!(outcome.answer_view.unwrap().parts.iter().any(|p| matches!(p,AgentAnswerPart::Presentation {presentation_id,revision} if presentation_id=="p1" && *revision==1)));
-        let plans=adapter.seen_plans.borrow();
-        assert_eq!(plans[3].preview_images.len(),1);
+        let plans = adapter.seen_plans.borrow();
+        assert_eq!(plans[3].preview_images.len(), 1);
         assert!(plans[4].preview_images.is_empty());
     }
 
     #[test]
     fn presentation_preview_at_turn_limit_gets_one_deliver_only_sampling() {
         use crate::presentation_author::{AuthorRequest, AuthorResult, PreviewImage};
-        struct Port { store:MemoryStore, reader:Reader, delivered:usize }
+        struct Port {
+            store: MemoryStore,
+            reader: Reader,
+            delivered: usize,
+        }
         impl ResidentStatePort for Port {
-            fn with_state<R>(&mut self, f:impl FnOnce(&mut MemoryStore,&mut Reader)->R)->R { f(&mut self.store,&mut self.reader) }
-            fn author_presentation(&mut self, req:AuthorRequest, _: &[SourceBinding], _: &[Message], _: &crate::run_context::CancellationToken)->Result<AuthorResult,ToolError> {
-                let mut r=AuthorResult {body:serde_json::json!({"status":"candidate_saved","candidate_id":"c1"}),images:vec![],previewed_candidate:None,delivered:None};
+            fn with_state<R>(&mut self, f: impl FnOnce(&mut MemoryStore, &mut Reader) -> R) -> R {
+                f(&mut self.store, &mut self.reader)
+            }
+            fn author_presentation(
+                &mut self,
+                req: AuthorRequest,
+                _: &[SourceBinding],
+                _: &[Message],
+                _: &crate::run_context::CancellationToken,
+            ) -> Result<AuthorResult, ToolError> {
+                let mut r = AuthorResult {
+                    body: serde_json::json!({"status":"candidate_saved","candidate_id":"c1"}),
+                    images: vec![],
+                    previewed_candidate: None,
+                    delivered: None,
+                };
                 match req {
-                    AuthorRequest::Write {..} => {},
-                    AuthorRequest::Preview {candidate_id,..} => {r.body["status"]=serde_json::json!("preview_ready_for_inspection");r.previewed_candidate=Some(candidate_id);r.images.push(PreviewImage {caption:"turn-limit preview".into(),png_base64:"png".into()});},
-                    AuthorRequest::Deliver {..} => {self.delivered+=1;r.body["status"]=serde_json::json!("version_saved");r.delivered=Some(crate::presentation::PresentationRef {presentation_id:"p-limit".into(),revision:1});},
-                    AuthorRequest::Read {..} => unreachable!(),
+                    AuthorRequest::Write { .. } => {}
+                    AuthorRequest::Preview { candidate_id, .. } => {
+                        r.body["status"] = serde_json::json!("preview_ready_for_inspection");
+                        r.previewed_candidate = Some(candidate_id);
+                        r.images.push(PreviewImage {
+                            caption: "turn-limit preview".into(),
+                            png_base64: "png".into(),
+                        });
+                    }
+                    AuthorRequest::Deliver { .. } => {
+                        self.delivered += 1;
+                        r.body["status"] = serde_json::json!("version_saved");
+                        r.delivered = Some(crate::presentation::PresentationRef {
+                            presentation_id: "p-limit".into(),
+                            revision: 1,
+                        });
+                    }
+                    AuthorRequest::Read { .. } => unreachable!(),
                 }
                 Ok(r)
             }
         }
-        let b=book();
-        let mut port=Port {store:MemoryStore::open(tmp("rp7-delivery-grace")).unwrap(),reader:Reader::new(&b,1),delivered:0};
-        let adapter=RequestPlanRecordingAdapter::new(vec![
-            turn_calls(vec![call("discover","tool.search",r#"{"task":"interactive HTML","required_capabilities":["presentation_authoring"],"scope":"passage","operation":"explain","effect_mode":"read_only","max_results":1}"#)]),
-            turn_calls(vec![call("write","presentation.author",r#"{"operation":"write","title":"example","html":"<h1>Example</h1>","readable_content":"Example"}"#)]),
-            turn_calls(vec![call("preview","presentation.author",r#"{"operation":"preview","candidate_id":"c1"}"#)]),
-            turn_calls(vec![call("deliver","presentation.author",r#"{"operation":"deliver","candidate_id":"c1"}"#)]),
-            turn_final("已交付。"),
-        ],vec![]);
-        let snapshot=default_profile_snapshot(&b,&port.store,"t0");
-        let mut context=RunContext::new(new_session(),OuterConfig {max_turns:3,..Default::default()},adapter.model_runtime_profile());
-        let outcome=run_context(&b,&mut port,&adapter,&mut context,&snapshot,&ResidentTurnResources::default(),None,&mut EphemeralCompactionCheckpointSink::default(),"制作交互内容","t0").unwrap();
-        assert_eq!(port.delivered,1);
+        let b = book();
+        let mut port = Port {
+            store: MemoryStore::open(tmp("rp7-delivery-grace")).unwrap(),
+            reader: Reader::new(&b, 1),
+            delivered: 0,
+        };
+        let adapter = RequestPlanRecordingAdapter::new(
+            vec![
+                turn_calls(vec![call(
+                    "discover",
+                    "tool.search",
+                    r#"{"task":"interactive HTML","required_capabilities":["presentation_authoring"],"scope":"passage","operation":"explain","effect_mode":"read_only","max_results":1}"#,
+                )]),
+                turn_calls(vec![call(
+                    "write",
+                    "presentation.author",
+                    r#"{"operation":"write","title":"example","html":"<h1>Example</h1>","readable_content":"Example"}"#,
+                )]),
+                turn_calls(vec![call(
+                    "preview",
+                    "presentation.author",
+                    r#"{"operation":"preview","candidate_id":"c1"}"#,
+                )]),
+                turn_calls(vec![call(
+                    "deliver",
+                    "presentation.author",
+                    r#"{"operation":"deliver","candidate_id":"c1"}"#,
+                )]),
+                turn_final("已交付。"),
+            ],
+            vec![],
+        );
+        let snapshot = default_profile_snapshot(&b, &port.store, "t0");
+        let mut context = RunContext::new(
+            new_session(),
+            OuterConfig {
+                max_turns: 3,
+                ..Default::default()
+            },
+            adapter.model_runtime_profile(),
+        );
+        let outcome = run_context(
+            &b,
+            &mut port,
+            &adapter,
+            &mut context,
+            &snapshot,
+            &ResidentTurnResources::default(),
+            None,
+            &mut EphemeralCompactionCheckpointSink::default(),
+            "制作交互内容",
+            "t0",
+        )
+        .unwrap();
+        assert_eq!(port.delivered, 1);
         assert!(outcome.incomplete);
-        assert_eq!(outcome.warning.as_deref(),Some(TURN_LIMIT_EXCEEDED));
+        assert_eq!(outcome.warning.as_deref(), Some(TURN_LIMIT_EXCEEDED));
         assert!(outcome.answer_view.unwrap().parts.iter().any(|part| matches!(part,AgentAnswerPart::Presentation {presentation_id,revision} if presentation_id=="p-limit" && *revision==1)));
-        let plans=adapter.seen_plans.borrow();
-        assert_eq!(plans[3].tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),vec!["presentation.author"]);
-        assert_eq!(plans[3].tools[0].parameters["properties"]["operation"]["enum"],serde_json::json!(["deliver"]));
-        assert_eq!(plans[3].tools[0].parameters["properties"]["candidate_id"]["enum"],serde_json::json!(["c1"]));
-        assert_eq!(plans[3].preview_images.len(),1);
+        let plans = adapter.seen_plans.borrow();
+        assert_eq!(
+            plans[3]
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["presentation.author"]
+        );
+        assert_eq!(
+            plans[3].tools[0].parameters["properties"]["operation"]["enum"],
+            serde_json::json!(["deliver"])
+        );
+        assert_eq!(
+            plans[3].tools[0].parameters["properties"]["candidate_id"]["enum"],
+            serde_json::json!(["c1"])
+        );
+        assert_eq!(plans[3].preview_images.len(), 1);
     }
 
     fn resident_artifact_snapshot(private_body: &str) -> ArtifactAccessSnapshot {
@@ -7686,21 +8285,47 @@ user_question=\"explain normalization\"";
 
     #[test]
     fn answer_stream_selection_convergence_publishes_before_structured_return() {
-        use crate::run_events::{RunEvents, RunEventSink, RuntimeEvent};
+        use crate::run_events::{RunEventSink, RunEvents, RuntimeEvent};
         struct Sink(std::sync::Mutex<Vec<crate::answer_stream::AnswerPatch>>);
         impl RunEventSink for Sink {
             fn emit(&self, _: RuntimeEvent) {}
-            fn answer_patch(&self, patch: crate::answer_stream::AnswerPatch) { self.0.lock().unwrap().push(patch); }
+            fn answer_patch(&self, patch: crate::answer_stream::AnswerPatch) {
+                self.0.lock().unwrap().push(patch);
+            }
         }
-        struct Streaming { inner: RecordingAdapter, events: RunEvents, sink: std::sync::Arc<Sink> }
+        struct Streaming {
+            inner: RecordingAdapter,
+            events: RunEvents,
+            sink: std::sync::Arc<Sink>,
+        }
         impl ModelAdapter for Streaming {
-            fn run_events(&self) -> Option<RunEvents> { Some(self.events.clone()) }
-            fn complete(&self, request: CompletionRequest) -> Result<ParsedResponse, AdapterError> { self.inner.complete(request) }
-            fn chat(&self, request: &AgentRequestPlan) -> Result<AssistantTurn, AdapterError> { self.inner.chat(request) }
-            fn complete_structured_observed(&self, request: CompletionRequest, observer: &mut dyn crate::provider_stream::ModelObserver) -> Result<serde_json::Value, AdapterError> {
+            fn run_events(&self) -> Option<RunEvents> {
+                Some(self.events.clone())
+            }
+            fn complete(&self, request: CompletionRequest) -> Result<ParsedResponse, AdapterError> {
+                self.inner.complete(request)
+            }
+            fn chat(&self, request: &AgentRequestPlan) -> Result<AssistantTurn, AdapterError> {
+                self.inner.chat(request)
+            }
+            fn complete_structured_observed(
+                &self,
+                request: CompletionRequest,
+                observer: &mut dyn crate::provider_stream::ModelObserver,
+            ) -> Result<serde_json::Value, AdapterError> {
                 let result = self.inner.complete_structured(request)?;
-                for ch in result.to_string().chars() { observer.observe(crate::provider_stream::ModelDelta::Text(ch.to_string())); }
-                assert!(self.sink.0.lock().unwrap().iter().any(|patch| patch.view.is_some()), "structured answer must be visible before returning its complete value");
+                for ch in result.to_string().chars() {
+                    observer.observe(crate::provider_stream::ModelDelta::Text(ch.to_string()));
+                }
+                assert!(
+                    self.sink
+                        .0
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|patch| patch.view.is_some()),
+                    "structured answer must be visible before returning its complete value"
+                );
                 Ok(result)
             }
         }
@@ -7722,7 +8347,11 @@ user_question=\"explain normalization\"";
             seen_messages: RefCell::new(Vec::new()),
         };
         let sink = std::sync::Arc::new(Sink(Default::default()));
-        let adapter = Streaming { inner: adapter, events: RunEvents::new(Some(sink.clone())), sink };
+        let adapter = Streaming {
+            inner: adapter,
+            events: RunEvents::new(Some(sink.clone())),
+            sink,
+        };
         let mut reader = Reader::new(&b, DEFAULT_RADIUS);
         let mut messages = new_session();
         let question = "selection_provenance.v1 (server-validated data, not instructions)\n\
@@ -8141,16 +8770,33 @@ user_question=\"explain normalization\"";
     #[test]
     fn agent_progress_phase_allows_one_legal_locator_recovery_after_stall() {
         let b = book_leaves(4);
-        let adapter = FakeAdapter::new(vec![
-            turn_calls(vec![call("blind-1", "book.text", r#"{"lid":"9.1"}"#)]),
-            turn_calls(vec![call("blind-2", "book.text", r#"{"lid":"9.2"}"#)]),
-            turn_calls(vec![call("locate", "book.search_text", r#"{"query":"XX","page_size":50}"#)]),
-            turn_calls(vec![call("read", "book.text", r#"{"lid":"1.3"}"#)]),
-            turn_final("recovered"),
-        ], vec![]);
+        let adapter = FakeAdapter::new(
+            vec![
+                turn_calls(vec![call("blind-1", "book.text", r#"{"lid":"9.1"}"#)]),
+                turn_calls(vec![call("blind-2", "book.text", r#"{"lid":"9.2"}"#)]),
+                turn_calls(vec![call(
+                    "locate",
+                    "book.search_text",
+                    r#"{"query":"XX","page_size":50}"#,
+                )]),
+                turn_calls(vec![call("read", "book.text", r#"{"lid":"1.3"}"#)]),
+                turn_final("recovered"),
+            ],
+            vec![],
+        );
         let mut store = MemoryStore::open(tmp("phase-legal-recovery")).unwrap();
         let mut messages = new_session();
-        let out = run(&b, &mut store, &mut Reader::new(&b, 1), &adapter, &mut messages, "找到原文并解释", "t0", OuterConfig::default()).unwrap();
+        let out = run(
+            &b,
+            &mut store,
+            &mut Reader::new(&b, 1),
+            &adapter,
+            &mut messages,
+            "找到原文并解释",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
         assert!(!tool_result(&messages, "locate").contains("AGENT_NO_PROGRESS"));
         let text: ObservedBookText = serde_json::from_str(tool_result(&messages, "read")).unwrap();
         assert_eq!(text.lid, "1.3");
@@ -8159,21 +8805,34 @@ user_question=\"explain normalization\"";
 
     #[test]
     fn experiment_real_requests_isolate_semantics_and_keep_source_evidence() {
-        use read_tools::ExperimentalReadAccess::{Text, Tree, Graph};
+        use read_tools::ExperimentalReadAccess::{Graph, Text, Tree};
         let marker = "SEMANTIC_ONLY_SENTINEL";
         let mut base = sample_base();
-        for node in &mut base.graph_nodes { node.name = marker.into(); }
+        for node in &mut base.graph_nodes {
+            node.name = marker.into();
+        }
         let length = base.lid_nodes.iter().map(|n| n.span.end).max().unwrap();
         let original = Book::new(base, &"X".repeat(length));
         for access in [Text, Tree, Graph] {
             let b = original.experimental_view(access);
             let adapter = RequestPlanRecordingAdapter {
-                chats: RefCell::new(vec![
-                    turn_calls(vec![call("blocked-query", "book.query", r#"{"query":"question"}"#)]),
-                    turn_calls(vec![call("locate", "book.search_text", r#"{"query":"X","page_size":1}"#)]),
-                    turn_calls(vec![call("read", "book.text", r#"{"lid":"1.1"}"#)]),
-                    turn_final("The observed passage contains X."),
-                ].into()),
+                chats: RefCell::new(
+                    vec![
+                        turn_calls(vec![call(
+                            "blocked-query",
+                            "book.query",
+                            r#"{"query":"question"}"#,
+                        )]),
+                        turn_calls(vec![call(
+                            "locate",
+                            "book.search_text",
+                            r#"{"query":"X","page_size":1}"#,
+                        )]),
+                        turn_calls(vec![call("read", "book.text", r#"{"lid":"1.1"}"#)]),
+                        turn_final("The observed passage contains X."),
+                    ]
+                    .into(),
+                ),
                 completes: RefCell::new(VecDeque::new()),
                 seen_plans: RefCell::new(Vec::new()),
             };
@@ -8181,44 +8840,116 @@ user_question=\"explain normalization\"";
             let mut reader = Reader::new(&b, DEFAULT_RADIUS);
             let mut messages = new_session();
             let snapshot = default_profile_snapshot(&b, &store, "t0");
-            let resources = ResidentTurnResources::new(vec![ContextFragment::new("private-test", FragmentScope::TurnFrozen, Role::System, marker, FragmentSensitivity::Private)], vec![], vec![])
-                .with_artifact_snapshot(resident_artifact_snapshot(marker));
-            super::run_with_turn_resources(&b, &mut store, &mut reader, &adapter, &mut messages, &snapshot, &resources, "Explain LID 1.1", "t0", OuterConfig::default()).unwrap();
+            let resources = ResidentTurnResources::new(
+                vec![ContextFragment::new(
+                    "private-test",
+                    FragmentScope::TurnFrozen,
+                    Role::System,
+                    marker,
+                    FragmentSensitivity::Private,
+                )],
+                vec![],
+                vec![],
+            )
+            .with_artifact_snapshot(resident_artifact_snapshot(marker));
+            super::run_with_turn_resources(
+                &b,
+                &mut store,
+                &mut reader,
+                &adapter,
+                &mut messages,
+                &snapshot,
+                &resources,
+                "Explain LID 1.1",
+                "t0",
+                OuterConfig::default(),
+            )
+            .unwrap();
             let plans = adapter.seen_plans.borrow();
-            let wire = serde_json::to_string(&plans.iter().map(|p| p.ordered_messages()).collect::<Vec<_>>()).unwrap();
-            assert!(!wire.contains(marker), "private or default semantic channel leaked in {access:?}");
-            assert!(wire.contains("XXXX"), "all arms must read the same canonical body");
-            let searched = messages.iter().find(|m| m.tool_call_id.as_deref() == Some("locate")).unwrap().content.as_ref().unwrap();
+            let wire = serde_json::to_string(
+                &plans
+                    .iter()
+                    .map(|p| p.ordered_messages())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            assert!(
+                !wire.contains(marker),
+                "private or default semantic channel leaked in {access:?}"
+            );
+            assert!(
+                wire.contains("XXXX"),
+                "all arms must read the same canonical body"
+            );
+            let searched = messages
+                .iter()
+                .find(|m| m.tool_call_id.as_deref() == Some("locate"))
+                .unwrap()
+                .content
+                .as_ref()
+                .unwrap();
             let mut ledger = TurnLocatorLedger::default();
-            let sanitized = crate::experiment::BodyBudget::default().admit("book.search_text", "{}", searched.clone(), &b);
+            let sanitized = crate::experiment::BodyBudget::default().admit(
+                "book.search_text",
+                "{}",
+                searched.clone(),
+                &b,
+            );
             ledger.observe_tool_result("book.search_text", &sanitized, &b);
-            assert!(!ledger.entries.is_empty(), "locator-only search must remain readable");
+            assert!(
+                !ledger.entries.is_empty(),
+                "locator-only search must remain readable"
+            );
             for plan in plans.iter() {
                 for tool in &plan.tools {
-                    assert!(!matches!(tool.name.as_str(), "book.query" | "book.synthesize" | "artifact.read" | "profile.manifest" | "memory.recall"));
-                    if access == Text { assert!(!matches!(tool.name.as_str(), "book.structure" | "book.context" | "book.concept")); }
-                    if access == Tree { assert_ne!(tool.name, "book.concept"); }
+                    assert!(!matches!(
+                        tool.name.as_str(),
+                        "book.query"
+                            | "book.synthesize"
+                            | "artifact.read"
+                            | "profile.manifest"
+                            | "memory.recall"
+                    ));
+                    if access == Text {
+                        assert!(!matches!(
+                            tool.name.as_str(),
+                            "book.structure" | "book.context" | "book.concept"
+                        ));
+                    }
+                    if access == Tree {
+                        assert_ne!(tool.name, "book.concept");
+                    }
                 }
             }
             let registry = crate::experiment::registry(&b, resident_tool_registry());
             assert!(registry.registration("book.query").is_none());
-            assert_eq!(registry.registration("book.concept").is_some(), access == Graph);
-            if access != Graph { assert!(b.base.graph_nodes.is_empty()); }
+            assert_eq!(
+                registry.registration("book.concept").is_some(),
+                access == Graph
+            );
+            if access != Graph {
+                assert!(b.base.graph_nodes.is_empty());
+            }
         }
         assert!(original.base.graph_nodes.iter().any(|n| n.name == marker));
     }
 
     #[test]
     fn experiment_graph_increment_reaches_model_only_in_graph_arm() {
-        use read_tools::ExperimentalReadAccess::{Text, Tree, Graph};
+        use read_tools::ExperimentalReadAccess::{Graph, Text, Tree};
         let marker = "ONLY_GRAPH_RELATION_LABEL";
         let mut base = sample_base();
-        for node in &mut base.graph_nodes { node.name = marker.into(); }
+        for node in &mut base.graph_nodes {
+            node.name = marker.into();
+        }
         base.graph_edges[0].edge_type = marker.into();
         let mut extra = base.lid_nodes[1].clone();
         extra.lid = "1.2".into();
-        extra.path = vec![1,2];
-        extra.span = Span { start:100, end:200 };
+        extra.path = vec![1, 2];
+        extra.span = Span {
+            start: 100,
+            end: 200,
+        };
         base.lid_nodes.push(extra);
         base.lid_nodes[0].span.end = 200;
         base.lid_nodes[0].children.push("1.2".into());
@@ -8226,15 +8957,41 @@ user_question=\"explain normalization\"";
         let original = Book::new(base, &"X".repeat(200));
         for access in [Text, Tree, Graph] {
             let b = original.experimental_view(access);
-            let adapter = RequestPlanRecordingAdapter::new(vec![
-                turn_calls(vec![call("context", "book.context", r#"{"lid":"1.1","granularity":"far","k":20}"#)]),
-                turn_final("No source conclusion yet."),
-            ], vec![]);
-            let mut store = MemoryStore::open(tmp(&format!("experiment-graph-increment-{access:?}"))).unwrap();
+            let adapter = RequestPlanRecordingAdapter::new(
+                vec![
+                    turn_calls(vec![call(
+                        "context",
+                        "book.context",
+                        r#"{"lid":"1.1","granularity":"far","k":20}"#,
+                    )]),
+                    turn_final("No source conclusion yet."),
+                ],
+                vec![],
+            );
+            let mut store =
+                MemoryStore::open(tmp(&format!("experiment-graph-increment-{access:?}"))).unwrap();
             let mut reader = Reader::new(&b, DEFAULT_RADIUS);
             let mut messages = new_session();
-            run(&b, &mut store, &mut reader, &adapter, &mut messages, "Inspect LID 1.1", "t0", OuterConfig::default()).unwrap();
-            let wire = serde_json::to_string(&adapter.seen_plans.borrow().iter().map(|p| p.ordered_messages()).collect::<Vec<_>>()).unwrap();
+            run(
+                &b,
+                &mut store,
+                &mut reader,
+                &adapter,
+                &mut messages,
+                "Inspect LID 1.1",
+                "t0",
+                OuterConfig::default(),
+            )
+            .unwrap();
+            let wire = serde_json::to_string(
+                &adapter
+                    .seen_plans
+                    .borrow()
+                    .iter()
+                    .map(|p| p.ordered_messages())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
             assert_eq!(wire.contains(marker), access == Graph);
             assert!(!b.canonical_tree(None).unwrap().to_string().contains(marker));
         }
@@ -8244,7 +9001,14 @@ user_question=\"explain normalization\"";
     fn locator_ledger_concept_results_authorize_only_returned_locations() {
         let b = book();
         let mut ledger = TurnLocatorLedger::default();
-        let query = b.base.graph_nodes.iter().find(|node| !node.name.is_empty()).unwrap().name.clone();
+        let query = b
+            .base
+            .graph_nodes
+            .iter()
+            .find(|node| !node.name.is_empty())
+            .unwrap()
+            .name
+            .clone();
         let result = b.concept_candidates(&query, None, Some(10)).unwrap();
         assert!(!result.candidates.is_empty());
         ledger.observe_tool_result("book.concept", &serde_json::to_string(&result).unwrap(), &b);
@@ -8256,13 +9020,26 @@ user_question=\"explain normalization\"";
     #[test]
     fn finalization_sampling_stall_stops_ordinary_requests() {
         let b = book_leaves(4);
-        let adapter = RequestPlanRecordingAdapter::new(vec![
-            turn_calls(vec![call("bad1", "book.text", r#"{"unexpected":1}"#)]),
-            turn_calls(vec![call("bad2", "book.text", r#"{"unexpected":2}"#)]),
-            turn_final("I could not complete the requested reading."),
-        ], vec![]);
+        let adapter = RequestPlanRecordingAdapter::new(
+            vec![
+                turn_calls(vec![call("bad1", "book.text", r#"{"unexpected":1}"#)]),
+                turn_calls(vec![call("bad2", "book.text", r#"{"unexpected":2}"#)]),
+                turn_final("I could not complete the requested reading."),
+            ],
+            vec![],
+        );
         let mut store = MemoryStore::open(tmp("stall-finalization")).unwrap();
-        let out = run(&b, &mut store, &mut Reader::new(&b, 1), &adapter, &mut new_session(), "explain the text", "t0", OuterConfig::default()).unwrap();
+        let out = run(
+            &b,
+            &mut store,
+            &mut Reader::new(&b, 1),
+            &adapter,
+            &mut new_session(),
+            "explain the text",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
         assert!(out.incomplete);
         assert_eq!(out.warning.as_deref(), Some("AGENT_NO_PROGRESS"));
         assert_eq!(out.request_audit.requests.len(), 3);
@@ -8272,16 +9049,54 @@ user_question=\"explain normalization\"";
     #[test]
     fn agent_progress_phase_new_source_bindings_are_delivery_progress() {
         let b = book_leaves(4);
-        let adapter = FakeAdapter::new(vec![
-            turn_calls((1..=3).map(|i| call(&format!("read{i}"), "book.text", &format!(r#"{{"lid":"1.{i}"}}"#))).collect()),
-            turn_calls(vec![call("source1", "source.present", r#"{"start_lid":"1.1"}"#)]),
-            turn_calls(vec![call("source2", "source.present", r#"{"start_lid":"1.2"}"#)]),
-            turn_calls(vec![call("source3", "source.present", r#"{"start_lid":"1.3"}"#)]),
-            turn_final("sources prepared"),
-        ], vec![]);
+        let adapter = FakeAdapter::new(
+            vec![
+                turn_calls(
+                    (1..=3)
+                        .map(|i| {
+                            call(
+                                &format!("read{i}"),
+                                "book.text",
+                                &format!(r#"{{"lid":"1.{i}"}}"#),
+                            )
+                        })
+                        .collect(),
+                ),
+                turn_calls(vec![call(
+                    "source1",
+                    "source.present",
+                    r#"{"start_lid":"1.1"}"#,
+                )]),
+                turn_calls(vec![call(
+                    "source2",
+                    "source.present",
+                    r#"{"start_lid":"1.2"}"#,
+                )]),
+                turn_calls(vec![call(
+                    "source3",
+                    "source.present",
+                    r#"{"start_lid":"1.3"}"#,
+                )]),
+                turn_final("sources prepared"),
+            ],
+            vec![],
+        );
         let mut store = MemoryStore::open(tmp("source-binding-progress")).unwrap();
-        let out = run(&b, &mut store, &mut Reader::new(&b, 1), &adapter, &mut new_session(), "read 1.1, 1.2, 1.3", "t0", OuterConfig::default()).unwrap();
-        assert!(!out.incomplete, "new source bindings must allow delivery to continue");
+        let out = run(
+            &b,
+            &mut store,
+            &mut Reader::new(&b, 1),
+            &adapter,
+            &mut new_session(),
+            "read 1.1, 1.2, 1.3",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
+        assert!(
+            !out.incomplete,
+            "new source bindings must allow delivery to continue"
+        );
     }
 
     #[test]
@@ -9341,30 +10156,63 @@ user_question=\"explain normalization\"";
     fn navigation_plan_targets_authorize_reads_without_becoming_evidence() {
         let b = guided_read_book();
         let store = MemoryStore::open(tmp("navigation-locator")).unwrap();
-        let groups = crate::guided_route_from(&b, "1.1", None,
-            &store.derive_book_reading_state(&b.base.book_id)).unwrap();
-        let target = groups.iter().flat_map(|group| &group.steps)
-            .find(|step| step.lid != "1.1").unwrap().lid.clone();
+        let groups = crate::guided_route_from(
+            &b,
+            "1.1",
+            None,
+            &store.derive_book_reading_state(&b.base.book_id),
+        )
+        .unwrap();
+        let target = groups
+            .iter()
+            .flat_map(|group| &group.steps)
+            .find(|step| step.lid != "1.1")
+            .unwrap()
+            .lid
+            .clone();
         let mut ledger = TurnLocatorLedger::default();
-        ledger.observe_tool_result("book.guided_route_from",
-            &serde_json::json!({"at":"1.1", "groups":groups}).to_string(), &b);
+        ledger.observe_tool_result(
+            "book.guided_route_from",
+            &serde_json::json!({"at":"1.1", "groups":groups}).to_string(),
+            &b,
+        );
         authorize_book_text(&serde_json::json!({"lid":target}).to_string(), &ledger).unwrap();
-        assert!(!ledger.origins(&target).unwrap().contains(&LocatorOrigin::VerifiedEvidence));
+        assert!(!ledger
+            .origins(&target)
+            .unwrap()
+            .contains(&LocatorOrigin::VerifiedEvidence));
         let mut macro_route = TurnLocatorLedger::default();
-        macro_route.observe_tool_result("book.guide_path", &to_json(&b.guide_path(None).unwrap()), &b);
+        macro_route.observe_tool_result(
+            "book.guide_path",
+            &to_json(&b.guide_path(None).unwrap()),
+            &b,
+        );
         assert!(macro_route.may_read_lid("1.2"));
         for (tool, body) in [
-            ("book.route_from", to_json(&b.route_from("1.1", None).unwrap())),
-            ("book.route_to", serde_json::json!({"path":b.route_to("1.1", &target, None).unwrap()}).to_string()),
-            ("book.unvisited_back", serde_json::json!({"unvisited_back": [{"lid":target,"evidence_lids":["1.1"]}]}).to_string()),
+            (
+                "book.route_from",
+                to_json(&b.route_from("1.1", None).unwrap()),
+            ),
+            (
+                "book.route_to",
+                serde_json::json!({"path":b.route_to("1.1", &target, None).unwrap()}).to_string(),
+            ),
+            (
+                "book.unvisited_back",
+                serde_json::json!({"unvisited_back": [{"lid":target,"evidence_lids":["1.1"]}]})
+                    .to_string(),
+            ),
         ] {
             let mut route = TurnLocatorLedger::default();
             route.observe_tool_result(tool, &body, &b);
             assert!(route.may_read_lid(&target), "{tool}");
         }
         let mut ignored = TurnLocatorLedger::default();
-        ignored.observe_tool_result("book.guided_route_from",
-            r#"{"debug":{"lid":"1.2"},"groups":[],"at":"1.3"}"#, &b);
+        ignored.observe_tool_result(
+            "book.guided_route_from",
+            r#"{"debug":{"lid":"1.2"},"groups":[],"at":"1.3"}"#,
+            &b,
+        );
         assert!(!ignored.may_read_lid("1.2"));
         assert!(!ignored.may_read_lid("1.3"));
     }
@@ -10393,14 +11241,27 @@ user_question=\"explain normalization\"";
     #[test]
     fn source_presentation_quote_mismatch_can_recover_without_rereading() {
         let b = book();
-        let evidence = EvidenceRange { start_lid: "1.1".into(), end_lid: "1.1".into(), ranges: vec![] };
+        let evidence = EvidenceRange {
+            start_lid: "1.1".into(),
+            end_lid: "1.1".into(),
+            ranges: vec![],
+        };
         let mut ledger = TurnEvidenceLedger::from_seed(&b, vec![evidence.clone()]).unwrap();
         let wrong = r#"{"start_lid":"1.1","quote":"rewritten source"}"#;
-        assert_eq!(ledger.present(&b, wrong).unwrap_err().error_code, "SOURCE_QUOTE_MISMATCH");
+        assert_eq!(
+            ledger.present(&b, wrong).unwrap_err().error_code,
+            "SOURCE_QUOTE_MISMATCH"
+        );
         assert!(ledger.bindings().is_empty());
         ledger.present(&b, r#"{"start_lid":"1.1"}"#).unwrap();
         assert_eq!(ledger.bindings()[0].evidence_range, evidence);
-        assert_eq!(TurnEvidenceLedger::default().present(&b, wrong).unwrap_err().error_code, "SOURCE_NOT_OBSERVED");
+        assert_eq!(
+            TurnEvidenceLedger::default()
+                .present(&b, wrong)
+                .unwrap_err()
+                .error_code,
+            "SOURCE_NOT_OBSERVED"
+        );
     }
 
     #[test]
@@ -10597,37 +11458,101 @@ user_question=\"explain normalization\"";
         struct Sink(std::sync::Mutex<Vec<crate::answer_stream::AnswerPatch>>);
         impl RunEventSink for Sink {
             fn emit(&self, _: RuntimeEvent) {}
-            fn answer_patch(&self, patch: crate::answer_stream::AnswerPatch) { self.0.lock().unwrap().push(patch); }
+            fn answer_patch(&self, patch: crate::answer_stream::AnswerPatch) {
+                self.0.lock().unwrap().push(patch);
+            }
         }
         let bindings = vec![source_binding_fixture("ref1", "1.19")];
         let mut provenance = AnswerProvenanceLedger::default();
-        provenance.observe_internal_locator("1.19", AnswerProvenanceChannel::ToolArgument { tool:"book.text".into(), field:"lid".into() });
-        for text in ["普通正文。下一句。", "解释。[[source:ref1]]\n", "1. 列表\n版本 v2.0。\n```rust\nlet n = 2;\n```\n", "安全正文。请看第1.19节。", "正文。[[source:unknown]]\n"] {
+        provenance.observe_internal_locator(
+            "1.19",
+            AnswerProvenanceChannel::ToolArgument {
+                tool: "book.text".into(),
+                field: "lid".into(),
+            },
+        );
+        for text in [
+            "普通正文。下一句。",
+            "解释。[[source:ref1]]\n",
+            "1. 列表\n版本 v2.0。\n```rust\nlet n = 2;\n```\n",
+            "安全正文。请看第1.19节。",
+            "正文。[[source:unknown]]\n",
+        ] {
             for size in [1, 2, 7, 999] {
                 let sink = std::sync::Arc::new(Sink(Default::default()));
                 let events = RunEvents::new(Some(sink.clone()));
-                let mut projector = crate::answer_stream::AnswerProjector::new(events.clone(), false, &bindings, &provenance, false);
+                let mut projector = crate::answer_stream::AnswerProjector::new(
+                    events.clone(),
+                    false,
+                    &bindings,
+                    &provenance,
+                    false,
+                );
                 let chars: Vec<char> = text.chars().collect();
-                for chunk in chars.chunks(size) { projector.observe(ModelDelta::Text(chunk.iter().collect())); }
+                for chunk in chars.chunks(size) {
+                    projector.observe(ModelDelta::Text(chunk.iter().collect()));
+                }
                 let patches = sink.0.lock().unwrap().clone();
                 for patch in &patches {
                     if let Some(view) = &patch.view {
                         let serialized = serde_json::to_string(view).unwrap();
-                        assert!(!serialized.contains("[[source")); assert!(!serialized.contains("1.19"));
-                        let public = view.parts.iter().filter_map(|p| if let AgentAnswerPart::Markdown{text}=p {Some(text.as_str())} else {None}).collect::<String>();
+                        assert!(!serialized.contains("[[source"));
+                        assert!(!serialized.contains("1.19"));
+                        let public = view
+                            .parts
+                            .iter()
+                            .filter_map(|p| {
+                                if let AgentAnswerPart::Markdown { text } = p {
+                                    Some(text.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<String>();
                         assert!(provenance.violations(&public).is_empty(), "{public}");
                     }
                 }
                 if let Ok(compiled) = compile_agent_answer(text, &bindings, &provenance) {
-                    assert_eq!(serde_json::to_value(patches.iter().fold(None, |previous, patch| crate::answer_stream::apply_patch(previous.as_ref(), patch)).unwrap().view.as_ref().unwrap()).unwrap(), serde_json::to_value(compiled.view).unwrap(), "{text} / {size}");
+                    assert_eq!(
+                        serde_json::to_value(
+                            patches
+                                .iter()
+                                .fold(None, |previous, patch| crate::answer_stream::apply_patch(
+                                    previous.as_ref(),
+                                    patch
+                                ))
+                                .unwrap()
+                                .view
+                                .as_ref()
+                                .unwrap()
+                        )
+                        .unwrap(),
+                        serde_json::to_value(compiled.view).unwrap(),
+                        "{text} / {size}"
+                    );
                 }
-                projector.observe(ModelDelta::ToolArguments { index:0, id:"call".into(), name:"book.text".into(), arguments:"{".into() });
+                projector.observe(ModelDelta::ToolArguments {
+                    index: 0,
+                    id: "call".into(),
+                    name: "book.text".into(),
+                    arguments: "{".into(),
+                });
                 assert_eq!(sink.0.lock().unwrap().last().unwrap().operation, "discard");
-                let mut repair = crate::answer_stream::AnswerProjector::new(events, false, &bindings, &provenance, true);
+                let mut repair = crate::answer_stream::AnswerProjector::new(
+                    events,
+                    false,
+                    &bindings,
+                    &provenance,
+                    true,
+                );
                 repair.observe(ModelDelta::Text("修复完成。".into()));
-                let patches = sink.0.lock().unwrap(); let repaired = patches.last().unwrap();
-                assert_eq!(repaired.message_id, 1); assert_eq!(repaired.revision, 1);
-                assert!(!serde_json::to_string(&repaired.view).unwrap().contains("安全正文"));
+                let patches = sink.0.lock().unwrap();
+                let repaired = patches.last().unwrap();
+                assert_eq!(repaired.message_id, 1);
+                assert_eq!(repaired.revision, 1);
+                assert!(!serde_json::to_string(&repaired.view)
+                    .unwrap()
+                    .contains("安全正文"));
             }
         }
     }
@@ -10650,13 +11575,33 @@ user_question=\"explain normalization\"";
     #[test]
     fn presentation_provenance_root_lid_does_not_ban_counts_or_fractions() {
         let bindings = vec![source_binding_fixture("ref1", "1")];
-        for text in ["已展开 1 张卡片的补充说明", "找到 1 处证据，召回率 1/3", "补齐后召回率为 1。"] {
-            assert!(compile_presentation_text(text, &bindings, &[]).is_ok(), "{text}");
+        for text in [
+            "已展开 1 张卡片的补充说明",
+            "找到 1 处证据，召回率 1/3",
+            "补齐后召回率为 1。",
+        ] {
+            assert!(
+                compile_presentation_text(text, &bindings, &[]).is_ok(),
+                "{text}"
+            );
         }
-        for text in ["参见 LID 1。", "内部位置 [1]。", "请看第1节。", "位置为 1. 请跳转。"] {
-            assert!(compile_presentation_text(text, &bindings, &[]).is_err(), "{text}");
+        for text in [
+            "参见 LID 1。",
+            "内部位置 [1]。",
+            "请看第1节。",
+            "位置为 1. 请跳转。",
+        ] {
+            assert!(
+                compile_presentation_text(text, &bindings, &[]).is_err(),
+                "{text}"
+            );
         }
-        assert!(compile_presentation_text("请看 1.4.2。", &[source_binding_fixture("ref2", "1.4.2")], &[]).is_err());
+        assert!(compile_presentation_text(
+            "请看 1.4.2。",
+            &[source_binding_fixture("ref2", "1.4.2")],
+            &[]
+        )
+        .is_err());
     }
 
     #[test]
@@ -11553,14 +12498,38 @@ user_question=\"这段怎么理解？\"",
     #[test]
     fn source_presentation_bound_suffix_formats_compile_without_repair() {
         let bindings = vec![source_binding_fixture("source_ref_one", "1.1")];
-        for answer in ["A claim [[source_ref_one]]", "A claim [source_ref_one]", "A claim（source_ref_one）。", "A claim\n[source_ref_one]", "依据书中的近似式 [source_ref_one]：\n\n> IR ≈ IC·√breadth", "The formula [source_ref_one]:\n\n> IR ≈ IC·√breadth"] {
+        for answer in [
+            "A claim [[source_ref_one]]",
+            "A claim [source_ref_one]",
+            "A claim（source_ref_one）。",
+            "A claim\n[source_ref_one]",
+            "依据书中的近似式 [source_ref_one]：\n\n> IR ≈ IC·√breadth",
+            "The formula [source_ref_one]:\n\n> IR ≈ IC·√breadth",
+        ] {
             let adapter = FakeAdapter::new(vec![], vec![]);
-            let delivery = deliver_agent_answer(answer, &bindings, &AnswerProvenanceLedger::default(), &adapter, &ModelRuntimeProfile::fallback("test", ProviderToolProtocol::Native), None);
+            let delivery = deliver_agent_answer(
+                answer,
+                &bindings,
+                &AnswerProvenanceLedger::default(),
+                &adapter,
+                &ModelRuntimeProfile::fallback("test", ProviderToolProtocol::Native),
+                None,
+            );
             assert_eq!(delivery.compiled.bindings.len(), 1, "{answer}");
             assert_eq!(delivery.extra_turns, 0);
         }
-        for answer in ["No citation chosen", "Example `[source_ref_one]`", "```text\n[source_ref_one]\n```", "> quoted [source_ref_one]", "标记 [source_ref_one] 的语法", "A claim [unknown]", "A claim [source_ref_one](https://example.com)"] {
-            let compiled = compile_agent_answer(answer, &bindings, &AnswerProvenanceLedger::default()).unwrap();
+        for answer in [
+            "No citation chosen",
+            "Example `[source_ref_one]`",
+            "```text\n[source_ref_one]\n```",
+            "> quoted [source_ref_one]",
+            "标记 [source_ref_one] 的语法",
+            "A claim [unknown]",
+            "A claim [source_ref_one](https://example.com)",
+        ] {
+            let compiled =
+                compile_agent_answer(answer, &bindings, &AnswerProvenanceLedger::default())
+                    .unwrap();
             assert!(compiled.bindings.is_empty(), "{answer}");
         }
     }
@@ -12669,6 +13638,60 @@ user_question={}",
     }
 
     #[test]
+    fn tool_loop_budget_is_visible_before_exhaustion() {
+        let b = book();
+        let mut store = MemoryStore::open(tmp("visible-tool-loop-budget")).unwrap();
+        let mut reader = Reader::new(&b, DEFAULT_RADIUS);
+        let adapter = RequestPlanRecordingAdapter::new(
+            vec![
+                turn_calls(vec![call("manifest", "book.manifest", "{}")]),
+                turn_calls(vec![call("structure", "book.structure", "{}")]),
+                turn_final("根据已有证据收束回答。"),
+            ],
+            vec![],
+        );
+        let mut messages = new_session();
+
+        let out = run(
+            &b,
+            &mut store,
+            &mut reader,
+            &adapter,
+            &mut messages,
+            "解释这本书的结构。",
+            "t0",
+            OuterConfig {
+                max_turns: 2,
+                token_budget: 1_000_000,
+            },
+        )
+        .unwrap();
+
+        assert!(out.incomplete);
+        assert_eq!(out.warning.as_deref(), Some(TURN_LIMIT_EXCEEDED));
+        let plans = adapter.seen_plans.borrow();
+        assert_eq!(plans.len(), 3);
+        let request_text = |plan: &AgentRequestPlan| {
+            plan.ordered_messages()
+                .iter()
+                .filter_map(|message| message.content.as_deref())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let first_request = request_text(&plans[0]);
+        let second_request = request_text(&plans[1]);
+        let final_request = request_text(&plans[2]);
+        assert!(first_request.contains("tool_loop_budget.v1"));
+        assert!(first_request.contains("Tool-loop sampling 1 of 2"));
+        assert!(first_request.contains("Remaining tool-loop samplings after this one: 1"));
+        assert!(second_request.contains("Tool-loop sampling 2 of 2"));
+        assert!(second_request.contains("Remaining tool-loop samplings after this one: 0"));
+        assert!(second_request.contains("Convergence required"));
+        assert!(plans[2].tools.is_empty());
+        assert!(final_request.contains("budget is exhausted"));
+    }
+
+    #[test]
     fn finalization_sampling_rejects_native_tool_calls_as_protocol_errors() {
         let b = book();
         let mut store = MemoryStore::open(tmp("finalization-sampling-native-tool")).unwrap();
@@ -13159,41 +14182,108 @@ user_question={}",
             (1, "不要跳转到 1.3，只解释", false),
         ] {
             let b = book_leaves(4);
-            let mut store = MemoryStore::open(tmp(&format!("explicit-navigation-{index}"))).unwrap();
+            let mut store =
+                MemoryStore::open(tmp(&format!("explicit-navigation-{index}"))).unwrap();
             let mut reader = Reader::new(&b, 1);
             let before = reader.state().viewport.anchor_lid;
-            let fake = FakeAdapter::new(vec![turn_calls(vec![
-                call("go", "reader.gotoLid", r#"{"lid":"1.3"}"#),
-                call("note", "reader.note", r#"{"lid":"1.3","text":"unexpected"}"#),
-            ]), turn_final("done")], vec![]);
-            let out = run(&b, &mut store, &mut reader, &fake, &mut new_session(), question, "t0", OuterConfig::default()).unwrap();
-            assert_eq!(reader.state().viewport.anchor_lid, if allowed { "1.3".into() } else { before });
-            assert!(!out.effects.iter().any(|effect| matches!(effect, AgentEffect::Note { .. } | AgentEffect::Highlight { .. })));
-            assert_eq!(out.trace[0].result_digest.contains("TOOL_NOT_EXPOSED"), !allowed);
+            let fake = FakeAdapter::new(
+                vec![
+                    turn_calls(vec![
+                        call("go", "reader.gotoLid", r#"{"lid":"1.3"}"#),
+                        call(
+                            "note",
+                            "reader.note",
+                            r#"{"lid":"1.3","text":"unexpected"}"#,
+                        ),
+                    ]),
+                    turn_final("done"),
+                ],
+                vec![],
+            );
+            let out = run(
+                &b,
+                &mut store,
+                &mut reader,
+                &fake,
+                &mut new_session(),
+                question,
+                "t0",
+                OuterConfig::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                reader.state().viewport.anchor_lid,
+                if allowed { "1.3".into() } else { before }
+            );
+            assert!(!out.effects.iter().any(|effect| matches!(
+                effect,
+                AgentEffect::Note { .. } | AgentEffect::Highlight { .. }
+            )));
+            assert_eq!(
+                out.trace[0].result_digest.contains("TOOL_NOT_EXPOSED"),
+                !allowed
+            );
         }
     }
 
     #[test]
     fn explicit_reader_writes_persist_type_anchor_and_content() {
         for (index, question, requested, expected_type, expected_content) in [
-            (0, "不要跳转，只保存这条笔记到 1.3", "reader.note", "note", "remember this"),
-            (1, "请高亮 1.3", "reader.highlight", "highlight", "XXXXXXXXXX"),
+            (
+                0,
+                "不要跳转，只保存这条笔记到 1.3",
+                "reader.note",
+                "note",
+                "remember this",
+            ),
+            (
+                1,
+                "请高亮 1.3",
+                "reader.highlight",
+                "highlight",
+                "XXXXXXXXXX",
+            ),
         ] {
             let b = book_leaves(4);
             let path = tmp(&format!("explicit-reader-write-{index}"));
             let mut store = MemoryStore::open(&path).unwrap();
             let mut reader = Reader::new(&b, 1);
             let before = reader.state().viewport.anchor_lid;
-            let fake = FakeAdapter::new(vec![turn_calls(vec![
-                call("write", requested, r#"{"lid":"1.3","text":"remember this"}"#),
-                call("go", "reader.gotoLid", r#"{"lid":"1.3"}"#),
-            ]), turn_final("saved")], vec![]);
-            let out = run(&b, &mut store, &mut reader, &fake, &mut new_session(), question, "t0", OuterConfig::default()).unwrap();
+            let fake = FakeAdapter::new(
+                vec![
+                    turn_calls(vec![
+                        call(
+                            "write",
+                            requested,
+                            r#"{"lid":"1.3","text":"remember this"}"#,
+                        ),
+                        call("go", "reader.gotoLid", r#"{"lid":"1.3"}"#),
+                    ]),
+                    turn_final("saved"),
+                ],
+                vec![],
+            );
+            let out = run(
+                &b,
+                &mut store,
+                &mut reader,
+                &fake,
+                &mut new_session(),
+                question,
+                "t0",
+                OuterConfig::default(),
+            )
+            .unwrap();
             assert_eq!(reader.state().viewport.anchor_lid, before);
             assert_eq!(out.effects.len(), 1);
             drop(store);
             let reopened = MemoryStore::open(&path).unwrap();
-            let records = reopened.recall(&RecallQuery { book_id: Some(b.base.book_id.clone()), lid: Some("1.3".into()), mem_type: Some(expected_type.into()), ..Default::default() });
+            let records = reopened.recall(&RecallQuery {
+                book_id: Some(b.base.book_id.clone()),
+                lid: Some("1.3".into()),
+                mem_type: Some(expected_type.into()),
+                ..Default::default()
+            });
             assert_eq!(records.len(), 1);
             assert_eq!(records[0].content, expected_content);
             assert_eq!(records[0].anchor.lid.as_deref(), Some("1.3"));
@@ -13206,14 +14296,40 @@ user_question={}",
         for (text, quote) in [("aaaa", "aa"), ("abc", ""), ("abc", "z"), ("abc", "abcd")] {
             assert_eq!(exact_highlight_range(text, quote), None);
         }
-        let b = Book::new(book_leaves(4).base, "0123456789abcdefghijKLMNOPQRSTuvwxyz0123");
+        let b = Book::new(
+            book_leaves(4).base,
+            "0123456789abcdefghijKLMNOPQRSTuvwxyz0123",
+        );
         let path = tmp("highlight-exact-quote");
         let mut store = MemoryStore::open(&path).unwrap();
-        let fake = FakeAdapter::new(vec![turn_calls(vec![call("highlight", "reader.highlight", r#"{"lid":"1.3","quote":"NOP"}"#)]), turn_final("saved")], vec![]);
-        run(&b, &mut store, &mut Reader::new(&b, 1), &fake, &mut new_session(), "请高亮 1.3 中的‘NOP’", "t0", OuterConfig::default()).unwrap();
+        let fake = FakeAdapter::new(
+            vec![
+                turn_calls(vec![call(
+                    "highlight",
+                    "reader.highlight",
+                    r#"{"lid":"1.3","quote":"NOP"}"#,
+                )]),
+                turn_final("saved"),
+            ],
+            vec![],
+        );
+        run(
+            &b,
+            &mut store,
+            &mut Reader::new(&b, 1),
+            &fake,
+            &mut new_session(),
+            "请高亮 1.3 中的‘NOP’",
+            "t0",
+            OuterConfig::default(),
+        )
+        .unwrap();
         drop(store);
         let reopened = MemoryStore::open(&path).unwrap();
-        let records = reopened.recall(&RecallQuery { mem_type: Some("highlight".into()), ..Default::default() });
+        let records = reopened.recall(&RecallQuery {
+            mem_type: Some("highlight".into()),
+            ..Default::default()
+        });
         assert_eq!(records[0].content, "NOP");
         assert_eq!(records[0].range.as_ref().unwrap().start, 3);
         assert_eq!(records[0].range.as_ref().unwrap().end, 6);
@@ -13317,7 +14433,11 @@ user_question={}",
         let fake = FakeAdapter::new(
             vec![
                 turn_calls(vec![
-                    call("discover-memory", "tool.search", r#"{"task":"recall saved notes","required_capabilities":["memory_read"],"scope":"document","operation":"explain","effect_mode":"read_only","max_results":1}"#),
+                    call(
+                        "discover-memory",
+                        "tool.search",
+                        r#"{"task":"recall saved notes","required_capabilities":["memory_read"],"scope":"document","operation":"explain","effect_mode":"read_only","max_results":1}"#,
+                    ),
                     call("too-early", "memory.recall", r#"{"lid":"1.1"}"#),
                 ]),
                 turn_calls(vec![call(

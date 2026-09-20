@@ -2,6 +2,7 @@
 use super::*;
 use crate::agent_stream::{RunDescriptor, RunSnapshot, RunStream};
 use runtime::run_context::{CancellableAdapter, CancellationToken, ResidentStatePort, RunContext};
+use runtime::run_events::{RunEventSink, RuntimeEvent};
 use std::sync::{atomic::AtomicBool, Arc, Condvar, Mutex};
 
 pub(crate) trait AppStatePort {
@@ -37,15 +38,15 @@ impl<P: AppStatePort> ResidentStatePort for RuntimeStatePort<'_, P> {
     }
     fn with_state<R>(&mut self, operation: impl FnOnce(&mut MemoryStore, &mut Reader) -> R) -> R {
         self.port.with_app(|state| {
-                let before = state.reader.revision();
-                let result = operation(&mut state.store, &mut state.reader);
-                if state.reader.revision() != before {
-                    if let Some(stream) = state.active_agent_stream.as_ref().and_then(|s| s.upgrade()) {
-                        stream.reader_changed(reader_state_response(&state.book, &state.reader));
-                    }
+            let before = state.reader.revision();
+            let result = operation(&mut state.store, &mut state.reader);
+            if state.reader.revision() != before {
+                if let Some(stream) = state.active_agent_stream.as_ref().and_then(|s| s.upgrade()) {
+                    stream.reader_changed(reader_state_response(&state.book, &state.reader));
                 }
-                result
-            })
+            }
+            result
+        })
     }
 }
 
@@ -137,7 +138,7 @@ pub(crate) fn execute_prepared(
     prepared: PreparedAgentChat,
     cancellation: CancellationToken,
 ) -> ExecutionReport {
-    execute_observed(port, adapter, prepared, cancellation, None)
+    execute_observed(port, adapter, prepared, cancellation, None, None)
 }
 
 fn execute_observed(
@@ -146,6 +147,7 @@ fn execute_observed(
     mut prepared: PreparedAgentChat,
     cancellation: CancellationToken,
     stream: Option<&Arc<RunStream>>,
+    observability: Option<&Arc<crate::observability::ObservabilityRuntime>>,
 ) -> ExecutionReport {
     runtime::presentation_author::redact_history(&mut prepared.messages);
     runtime::tool_exposure::redact_history(&mut prepared.messages);
@@ -155,14 +157,32 @@ fn execute_observed(
         adapter.model_runtime_profile(),
     );
     context.cancellation = cancellation.clone();
-    if let Some(stream) = stream {
-        context.events = runtime::run_events::RunEvents::new(Some(stream.clone()));
-    }
+    let observation_run = observability.and_then(|runtime| {
+        runtime.start_run(&prepared.book.base.book_id, &prepared.turn_ref.session_id)
+    });
+    let observation_sink = observation_run.as_ref().map(|run| run.sink());
+    let event_sink: Option<Arc<dyn RunEventSink>> = match (stream, observation_sink) {
+        (Some(stream), Some(observation)) => Some(Arc::new(RunEventFanout {
+            stream: stream.clone(),
+            observation,
+        })),
+        (Some(stream), None) => Some(stream.clone()),
+        (None, Some(observation)) => Some(observation),
+        (None, None) => None,
+    };
+    context.events = runtime::run_events::RunEvents::with_start(
+        observation_run
+            .as_ref()
+            .map(|run| run.event_anchor())
+            .unwrap_or_else(std::time::Instant::now),
+        event_sink,
+    );
     adapter.set_run_cancellation(cancellation.clone());
     let observed = runtime::run_events::ObservedAdapter {
         inner: adapter,
         events: context.events.clone(),
         cancellation: cancellation.clone(),
+        runtime_profile: context.runtime_profile.clone(),
     };
     let adapter = CancellableAdapter {
         inner: &observed,
@@ -217,7 +237,18 @@ fn execute_observed(
         }
         messages
     };
-    port.with_app(|state| {
+    let observation_outcome = result.as_ref().ok().cloned();
+    let observation_error_code = result
+        .as_ref()
+        .err()
+        .map(|error| error.error_code.clone())
+        .or_else(|| {
+            observation_outcome
+                .as_ref()
+                .filter(|outcome| crate::observability::lifecycle::delivery_failed(outcome))
+                .map(|_| "ANSWER_DELIVERY_FAILED".into())
+        });
+    let report = port.with_app(|state| {
         if summary
             .effects
             .iter()
@@ -283,7 +314,52 @@ fn execute_observed(
             Ok(outcome) => ok_json(&outcome),
             Err(error) => err_reply(&error),
         })
-    })
+    });
+    if let Some(run) = observation_run {
+        run.finish(
+            observation_outcome.as_ref(),
+            cancelled,
+            if report.unsaved.is_some() {
+                runtime::observation::PersistenceState::Failed
+            } else {
+                runtime::observation::PersistenceState::Saved
+            },
+            observation_error_code.as_deref(),
+        );
+    }
+    report
+}
+
+struct RunEventFanout {
+    stream: Arc<RunStream>,
+    observation: Arc<dyn RunEventSink>,
+}
+
+impl RunEventSink for RunEventFanout {
+    fn emit(&self, event: RuntimeEvent) {
+        self.stream.emit(event.clone());
+        self.observation.emit(event);
+    }
+
+    fn answer_patch(&self, patch: runtime::answer_stream::AnswerPatch) {
+        self.stream.answer_patch(patch);
+    }
+
+    fn answer_first_patch(&self, elapsed_ms: f64) {
+        self.observation.answer_first_patch(elapsed_ms);
+    }
+
+    fn evidence_accepted(&self, observation: runtime::run_events::EvidenceObservation) {
+        self.observation.evidence_accepted(observation);
+    }
+
+    fn source_bindings(&self, bindings: &[runtime::orchestrator::SourceBinding]) {
+        self.stream.source_bindings(bindings);
+    }
+
+    fn effect_created(&self, step_id: u32, effect: &runtime::orchestrator::AgentEffect) {
+        self.stream.effect_created(step_id, effect);
+    }
 }
 
 struct ActiveRun {
@@ -305,10 +381,15 @@ pub struct RunCoordinator {
     host_stop: Arc<AtomicBool>,
     unsaved: Mutex<Option<UnsavedRun>>,
     unsaved_stream: Mutex<Option<Arc<RunStream>>>,
+    observability: Arc<crate::observability::ObservabilityRuntime>,
 }
 
 impl RunCoordinator {
-    pub fn new(state: Arc<Mutex<AppState>>, host_stop: Arc<AtomicBool>) -> Self {
+    pub fn new(
+        state: Arc<Mutex<AppState>>,
+        host_stop: Arc<AtomicBool>,
+        observability: Arc<crate::observability::ObservabilityRuntime>,
+    ) -> Self {
         Self {
             state,
             slot: Mutex::new(Slot::default()),
@@ -316,6 +397,7 @@ impl RunCoordinator {
             host_stop,
             unsaved: Mutex::new(None),
             unsaved_stream: Mutex::new(None),
+            observability,
         }
     }
     fn reserve(
@@ -356,7 +438,14 @@ impl RunCoordinator {
     ) -> Reply {
         let _running = RunGuard(self);
         let descriptor = stream.snapshot().descriptor;
-        let result = execute_observed(&self.state, adapter, prepared, cancellation, Some(&stream));
+        let result = execute_observed(
+            &self.state,
+            adapter,
+            prepared,
+            cancellation,
+            Some(&stream),
+            Some(&self.observability),
+        );
         if let Some(unsaved) = result.unsaved {
             stream.finish(None, Some(json!(unsaved.error)));
             *self.unsaved.lock().unwrap() = Some(unsaved);
@@ -452,7 +541,7 @@ impl RunCoordinator {
                                 AgentAssistantStatus::Failed => "failed",
                                 AgentAssistantStatus::PendingAssistant => "interrupted",
                             };
-                    RunStream::from_snapshot(RunSnapshot {
+                            RunStream::from_snapshot(RunSnapshot {
                                 descriptor: RunDescriptor {
                                     book_id: session.book_id.clone(),
                                     session_id: session.id.clone(),
@@ -482,9 +571,9 @@ impl RunCoordinator {
                                 draft: None,
                                 final_view: Some(json!(turn_view(&state.book, turn))),
                                 error: None,
-                    })
+                            })
+                        })
                 })
-            })
         })
     }
     pub fn cancel_run(&self, turn_id: &str) -> Option<RunSnapshot> {

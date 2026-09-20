@@ -2932,6 +2932,7 @@ dependencies = [
  "artifact-tools",
  "base-schema",
  "book-tool-contracts",
+ "httpdate",
  "libc",
  "memory",
  "read-tools",
@@ -2940,8 +2941,12 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "time",
  "tiny_http",
  "tungstenite",
+ "ureq",
+ "url",
+ "uuid",
 ]
 
 [[package]]

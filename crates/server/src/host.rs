@@ -1,4 +1,3 @@
-use serde_json::json;
 use crate::intent_build_store::IntentArtifactStore;
 use crate::{
     agent_history_review_cursors, ensure_agent_history_for_book, load_agent_history, load_session,
@@ -20,6 +19,7 @@ use runtime::memory_review::{
     ReviewTurnInput, ReviewTurnStatus,
 };
 use runtime::{AdapterError, ModelAdapter, ProviderConfig, ProviderRegistry};
+use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -107,7 +107,11 @@ impl SelectionTranslationExecutor for ProviderSelectionTranslationExecutor {
         timeout: Duration,
     ) -> Result<SelectionTranslationResponse, read_tools::ToolError> {
         if self.stop.load(Ordering::Acquire) {
-            return Err(read_tools::ToolError { error_code: "SERVICE_STOPPING".into(), category: "internal".into(), message: "Reader service is stopping".into() });
+            return Err(read_tools::ToolError {
+                error_code: "SERVICE_STOPPING".into(),
+                category: "internal".into(),
+                message: "Reader service is stopping".into(),
+            });
         }
         crate::execute_selection_translation(provider, work, timeout)
     }
@@ -208,6 +212,7 @@ pub struct RunningServer {
     state: Arc<Mutex<AppState>>,
     review_coordinator: Arc<ReviewCoordinator>,
     pub run_coordinator: Arc<crate::agent_run::RunCoordinator>,
+    observability: Arc<crate::observability::ObservabilityRuntime>,
 }
 
 pub struct ReviewRunOutcome {
@@ -412,7 +417,9 @@ impl ReviewCoordinator {
     }
 
     fn scheduler_tick(&self) -> Result<usize, read_tools::ToolError> {
-        if self.stopping.load(Ordering::Acquire) || self.resident_running.load(Ordering::Acquire) { return Ok(0); }
+        if self.stopping.load(Ordering::Acquire) || self.resident_running.load(Ordering::Acquire) {
+            return Ok(0);
+        }
         let now_ms = self.clock.now_millis();
         if self.ready_backfill_count() > 0 {
             return self
@@ -1028,6 +1035,10 @@ fn historical_backfill_provider_error(error: AdapterError) -> read_tools::ToolEr
 }
 
 impl RunningServer {
+    pub fn observability_status(&self) -> crate::observability::ObservabilityStatus {
+        self.observability.status()
+    }
+
     pub fn set_library_root(&self, library_root: PathBuf) {
         let mut state = self
             .state
@@ -1052,7 +1063,9 @@ impl RunningServer {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.adapter = if cfg!(target_os = "linux") && state.reader_only {
             crate::host_lifecycle::ServiceAdapter::from_config(config, self.stop.clone())
-        } else { ProviderRegistry::adapter_from_config(config) };
+        } else {
+            ProviderRegistry::adapter_from_config(config)
+        };
     }
 
     pub fn run_one_review(
@@ -1079,17 +1092,21 @@ impl RunningServer {
         for handle in self.handles.drain(..) {
             let _ = handle.join();
         }
+        self.observability.shutdown();
         force_flush_read_ledger(&self.state);
     }
 
     pub fn shutdown(mut self) {
         self.run_coordinator.stop_and_wait();
         self.stop.store(true, Ordering::Release);
-        self.review_coordinator.stopping.store(true, Ordering::Release);
+        self.review_coordinator
+            .stopping
+            .store(true, Ordering::Release);
         self.review_coordinator.wake.notify_all();
         for handle in self.handles.drain(..) {
             let _ = handle.join();
         }
+        self.observability.shutdown();
         force_flush_read_ledger(&self.state);
     }
 }
@@ -1101,10 +1118,18 @@ fn open_resident_memory_store(memory_path: &Path, now: &str) -> MemoryStore {
     }
 }
 
-fn route_paper_localization_request(state: &Arc<Mutex<AppState>>, adapter: &dyn ModelAdapter) -> Reply {
+fn route_paper_localization_request(
+    state: &Arc<Mutex<AppState>>,
+    adapter: &dyn ModelAdapter,
+) -> Reply {
     let (base, cache_path) = {
-        let guard = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        (guard.book.paper_minimap(), crate::paper_minimap_localization_cache_path(&guard.session_path))
+        let guard = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (
+            guard.book.paper_minimap(),
+            crate::paper_minimap_localization_cache_path(&guard.session_path),
+        )
     };
     crate::localize_paper_minimap(base, cache_path, adapter)
 }
@@ -1116,9 +1141,18 @@ fn bind_host_http(addr: &str, desktop_host: bool) -> Result<Server, String> {
         // simply advance to the next available port in the private dynamic range.
         for port in 49152..=65535 {
             match std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)) {
-                Ok(listener) => return Server::from_listener(listener, None)
-                    .map_err(|error| format!("failed to start desktop HTTP listener: {error}")),
-                Err(error) if matches!(error.kind(), std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied) => continue,
+                Ok(listener) => {
+                    return Server::from_listener(listener, None)
+                        .map_err(|error| format!("failed to start desktop HTTP listener: {error}"))
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied
+                    ) =>
+                {
+                    continue
+                }
                 Err(error) => return Err(format!("failed to bind desktop loopback: {error}")),
             }
         }
@@ -1245,9 +1279,11 @@ fn start_server_with_memory_path(
         workbench_loaded_revision: None,
         active_agent_stream: None,
     }));
+    let observability = crate::observability::ObservabilityRuntime::from_env();
     let run_coordinator = Arc::new(crate::agent_run::RunCoordinator::new(
         state.clone(),
         stop.clone(),
+        observability.clone(),
     ));
     let review_coordinator = Arc::new(ReviewCoordinator::new(
         state.clone(),
@@ -1303,6 +1339,7 @@ fn start_server_with_memory_path(
         let review_coordinator = review_coordinator.clone();
         let selection_translation_executor = selection_translation_executor.clone();
         let run_coordinator = run_coordinator.clone();
+        let observability = observability.clone();
         let dist = config.web_dist.clone();
         let reader_only = config.reader_only;
         let stop_signal = stop.clone();
@@ -1319,6 +1356,15 @@ fn start_server_with_memory_path(
                 let url = request.url().to_string();
                 let mut body = String::new();
                 let _ = request.as_reader().read_to_string(&mut body);
+                if method == "GET"
+                    && split_url(&normalize_api_url(&url)).0 == "/observability/status"
+                {
+                    let _ = request.respond(response_from_json(
+                        200,
+                        json!(observability.status()).to_string(),
+                    ));
+                    continue;
+                }
                 let response = match static_response(&dist, &method, &url) {
                     Some(reply) => response_from_static(reply),
                     None => {
@@ -1486,6 +1532,7 @@ fn start_server_with_memory_path(
         state,
         review_coordinator,
         run_coordinator,
+        observability,
     })
 }
 
@@ -1949,16 +1996,23 @@ mod tests {
         let running = start_server_with_memory_path(
             ServerHostConfig::desktop(root.join("library"), root.join("dist")),
             memory_path.clone(),
-        ).unwrap();
+        )
+        .unwrap();
         let book_id = {
             let mut state = running.state.lock().unwrap();
             let book_id = state.book.base.book_id.clone();
-            state.store.enqueue_read(&book_id, "1", "lx6-final-touch").unwrap();
+            state
+                .store
+                .enqueue_read(&book_id, "1", "lx6-final-touch")
+                .unwrap();
             assert_eq!(state.store.pending_read_count(), 1);
             book_id
         };
         running.shutdown();
-        assert_eq!(MemoryStore::open(memory_path).unwrap().read_lids(&book_id), vec!["1"]);
+        assert_eq!(
+            MemoryStore::open(memory_path).unwrap().read_lids(&book_id),
+            vec!["1"]
+        );
     }
 
     #[test]
@@ -2081,7 +2135,7 @@ mod tests {
             profile_context_cache: runtime::profile_context::ProfileContextCache::default(),
             visitor_sessions: VisitorSessions::default(),
             workbench_loaded_revision: None,
-        active_agent_stream: None,
+            active_agent_stream: None,
         }))
     }
 
@@ -2127,7 +2181,7 @@ mod tests {
             profile_context_cache: runtime::profile_context::ProfileContextCache::default(),
             visitor_sessions: VisitorSessions::default(),
             workbench_loaded_revision: None,
-        active_agent_stream: None,
+            active_agent_stream: None,
         }))
     }
 
@@ -2300,10 +2354,26 @@ mod tests {
     fn paper_localization_provider_does_not_hold_reader_lock() {
         struct Probe(Arc<Mutex<AppState>>, Arc<AtomicBool>);
         impl ModelAdapter for Probe {
-            fn complete(&self, _: runtime::CompletionRequest) -> Result<runtime::ParsedResponse, AdapterError> { unreachable!() }
-            fn chat(&self, _: &runtime::AgentRequestPlan) -> Result<runtime::AssistantTurn, AdapterError> { unreachable!() }
-            fn complete_structured(&self, _: runtime::CompletionRequest) -> Result<serde_json::Value, AdapterError> {
-                assert!(self.0.try_lock().is_ok(), "localization must release Reader state before calling Provider");
+            fn complete(
+                &self,
+                _: runtime::CompletionRequest,
+            ) -> Result<runtime::ParsedResponse, AdapterError> {
+                unreachable!()
+            }
+            fn chat(
+                &self,
+                _: &runtime::AgentRequestPlan,
+            ) -> Result<runtime::AssistantTurn, AdapterError> {
+                unreachable!()
+            }
+            fn complete_structured(
+                &self,
+                _: runtime::CompletionRequest,
+            ) -> Result<serde_json::Value, AdapterError> {
+                assert!(
+                    self.0.try_lock().is_ok(),
+                    "localization must release Reader state before calling Provider"
+                );
                 self.1.store(true, Ordering::SeqCst);
                 Ok(serde_json::json!({}))
             }
@@ -2316,7 +2386,8 @@ mod tests {
             guard.session_path = None;
         }
         let called = Arc::new(AtomicBool::new(false));
-        let response = route_paper_localization_request(&state, &Probe(state.clone(), called.clone()));
+        let response =
+            route_paper_localization_request(&state, &Probe(state.clone(), called.clone()));
         assert_eq!(response.status, 200);
         assert!(called.load(Ordering::SeqCst));
     }
@@ -2336,7 +2407,10 @@ mod tests {
         let first_addr = first.server_addr().to_ip().unwrap();
         let second_addr = second.server_addr().to_ip().unwrap();
         assert!(first_addr.ip().is_loopback());
-        assert!(first_addr.port() >= 49152, "browser-safe dynamic range: {first_addr}");
+        assert!(
+            first_addr.port() >= 49152,
+            "browser-safe dynamic range: {first_addr}"
+        );
         assert!(second_addr.port() >= 49152);
         assert_ne!(first_addr, second_addr);
     }

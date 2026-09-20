@@ -13,11 +13,16 @@ read-tools = { path = "../read-tools" }
 reader = { path = "../reader" }
 memory = { path = "../memory" }
 runtime = { path = "../runtime" }
+httpdate = "1.0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 tiny_http = "0.12"
 tungstenite = "0.28"
 tempfile = "3"
+time = { version = "0.3.53", features = ["formatting", "parsing"] }
+ureq = { version = "2.12.1", features = ["json"] }
+url = "2.5.7"
+uuid = { version = "1.23.4", features = ["v7"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
